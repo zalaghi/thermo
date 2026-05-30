@@ -365,13 +365,25 @@ p {
   font: inherit;
 }
 
+.form-stack select {
+  width: 100%;
+  min-height: 3rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.8rem 0.9rem;
+  background: #121416;
+  color: var(--text);
+  font: inherit;
+}
+
 .form-stack input[type="checkbox"] {
   width: 1.25rem;
   min-height: 1.25rem;
   accent-color: var(--accent);
 }
 
-.form-stack input:focus {
+.form-stack input:focus,
+.form-stack select:focus {
   border-color: var(--accent);
   outline: 0.18rem solid rgba(102, 209, 158, 0.18);
 }
@@ -488,6 +500,39 @@ p {
 .inline-form button {
   width: 100%;
   cursor: pointer;
+}
+
+.setup-command-panel {
+  display: grid;
+  gap: 0.85rem;
+  margin-bottom: 1.25rem;
+  border: 1px solid rgba(114, 214, 163, 0.26);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  background: rgba(114, 214, 163, 0.08);
+}
+
+.setup-command-panel h3,
+.setup-command-panel p {
+  margin-bottom: 0;
+}
+
+.setup-command-panel pre {
+  max-width: 100%;
+  margin: 0;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.9rem;
+  background: #090b0c;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.setup-command-panel code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.9rem;
 }
 
 @media (min-width: 42rem) {

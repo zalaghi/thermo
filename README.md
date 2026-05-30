@@ -2,38 +2,18 @@
 
 Thermo is a minimal, mobile-friendly temperature dashboard for small server and homelab environments.
 
-The central web app runs FastAPI, server-rendered Jinja2 HTML, plain CSS, plain JavaScript, and SQLite. Each monitored server runs a tiny read-only HTTP temperature agent protected by an API key. Thermo does not use SSH and is not intended to become a heavy monitoring stack.
+The central web app runs FastAPI, Jinja2, SQLite, plain CSS, and plain JavaScript. Each monitored server runs a tiny read-only HTTP temperature agent protected by an API key. Thermo does not use SSH and does not depend on Grafana, Prometheus, Netdata, Zabbix, LibreNMS, or any heavy monitoring stack.
 
-## Current Status
+## Quick Start: Central App
 
-Parts 1 through 7 currently provide:
-
-- FastAPI central web app
-- Jinja2 dashboard route at `/`
-- Dark mobile-first dashboard UI
-- SQLite database for users, servers, and latest status
-- Session-based admin login
-- Admin CRUD for monitored temperature-agent servers
-- Background HTTP polling for enabled agents
-- `/api/status` JSON for latest status
-- Tiny authenticated temperature agent
-- Docker setup for the central app
-- Direct Python install docs for agents
-
-Not implemented yet:
-
-- Security hardening and final QA pass
-
-## Central App: Docker Quick Start
-
-Review and change the default secrets in `docker-compose.yml` before using Thermo beyond local testing:
+Review and change the default secrets in `docker-compose.yml` before real use:
 
 ```yaml
 THERMO_ADMIN_PASSWORD: change-me-now
 THERMO_SECRET_KEY: change-me-to-a-long-random-secret
 ```
 
-Start the central panel:
+Start Thermo:
 
 ```bash
 docker compose up --build -d
@@ -45,293 +25,150 @@ Open:
 http://127.0.0.1:8088
 ```
 
-The compose file maps host port `8088` to container port `8080` and stores SQLite data in:
-
-```text
-./data:/data
-```
-
-The central app uses:
-
-```text
-THERMO_DB_PATH=/data/thermo.db
-THERMO_ADMIN_USER=admin
-THERMO_ADMIN_PASSWORD=change-me-now
-THERMO_SECRET_KEY=change-me-to-a-long-random-secret
-THERMO_POLL_INTERVAL=5
-TZ=Asia/Tehran
-```
-
-Check logs:
-
-```bash
-docker compose logs -f thermo
-```
-
-Stop the central panel:
-
-```bash
-docker compose down
-```
-
-## Central App: Direct Python Run
-
-For development without Docker:
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-mkdir -p data
-export THERMO_DB_PATH=./data/thermo.db
-export THERMO_ADMIN_USER=admin
-export THERMO_ADMIN_PASSWORD=change-me-now
-export THERMO_SECRET_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
-export THERMO_POLL_INTERVAL=5
-uvicorn app.main:app --host 0.0.0.0 --port 8080
-```
-
-Open:
-
-```text
-http://127.0.0.1:8080
-```
+The central container listens on `8080`, the host exposes `8088`, and SQLite is stored in `./data:/data`.
 
 ## Admin Workflow
 
 1. Open `/admin/login`.
-2. Sign in with the configured admin username and password.
-3. Change the default admin password in your environment before real use.
-4. Open `/admin/servers`.
-5. Add a server with:
-   - Name
-   - Agent URL, for example `http://192.168.1.10:8090/temperature`
-   - Agent API key
-   - Warning and critical thresholds
-6. Return to `/` to view real-time temperature cards.
+2. Sign in with `THERMO_ADMIN_USER` and `THERMO_ADMIN_PASSWORD`.
+3. Open `/admin/setup-agent`.
+4. Choose the target platform.
+5. Enter the server name, Thermo URL reachable from the target server, agent bind host, agent port, and thresholds.
+6. Copy the generated one-line command.
+7. Run it on the target server.
+8. Return to `/` to see the live temperature card.
 
-Saved API keys are not shown in full in the admin UI or `/api/status`.
+The setup command contains a short-lived single-use pairing token. It does not contain the permanent agent API key. Thermo generates the permanent API key during registration, stores it, and returns it only to the installer.
 
-## Temperature Agent
+## Agent Setup Wizard
 
-The Thermo agent is a tiny read-only FastAPI service. It exposes:
+The wizard supports:
 
-- `GET /health`, public, returns `{"ok": true}`
-- `GET /temperature`, protected by `X-API-Key`, returns `{"temperature": 42.5, "unit": "C"}`
+- Proxmox
+- Debian / Ubuntu
+- Generic systemd Linux
+- FreeBSD
+- TrueNAS CORE
+- Other / Advanced
 
-Required agent environment:
-
-```text
-THERMO_AGENT_API_KEY=<long-random-secret>
-THERMO_TEMP_COMMAND=<read-only-temperature-command>
-```
-
-Optional:
+The generated command uses the public installer script:
 
 ```text
-THERMO_TEMP_TIMEOUT_SECONDS=3
+https://raw.githubusercontent.com/zalaghi/thermo/main/scripts/install-agent.sh
 ```
 
-Generate a good API key:
+The installer downloads Thermo source from:
 
-```bash
-python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+```text
+https://github.com/zalaghi/thermo/archive/refs/heads/main.tar.gz
 ```
 
-Test an agent:
+The target server registers back with:
 
-```bash
-curl http://192.168.1.10:8090/health
-curl -H 'X-API-Key: replace-with-the-agent-secret' http://192.168.1.10:8090/temperature
+```text
+POST /api/setup/register
 ```
 
-## Proxmox/Debian Agent Install
+Registration creates or updates the saved server entry using the wizard values.
 
-Run these commands on the monitored Proxmox/Debian server.
+## Proxmox / Debian / Ubuntu Agent
 
-Install OS dependencies:
+Use the wizard first. It generates the command you should run on the target server.
+
+The installer will try to:
+
+- install `python3`, `python3-venv`, `curl`, `tar`, and `lm-sensors` with `apt`
+- install the agent into `/opt/thermo-agent`
+- create `/etc/thermo-agent.env`
+- create and start `thermo-agent.service` when systemd is available
+- test `/health`
+- test `/temperature` with the permanent API key
+
+Before or after installation, confirm sensors work:
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv lm-sensors
+sudo apt install -y lm-sensors
 sudo sensors-detect
 sensors
 ```
 
-Create a dedicated directory and copy the Thermo agent files into it:
-
-```bash
-sudo mkdir -p /opt/thermo-agent
-sudo cp -r agent /opt/thermo-agent/
-sudo chown -R root:root /opt/thermo-agent
-cd /opt/thermo-agent
-```
-
-Create a Python virtual environment:
-
-```bash
-sudo python3 -m venv .venv
-sudo ./.venv/bin/pip install -r agent/requirements.txt
-```
-
-Test the command manually:
+The default Linux temperature command is:
 
 ```bash
 sensors | awk '/Package id 0|Tctl|CPU/ {print $0; exit}' | grep -oE '[+-]?[0-9]+(\.[0-9]+)?°C' | head -n1 | tr -d '+°C'
 ```
 
-Run the agent manually first. Bind to a LAN/private IP when possible:
+If your hardware reports a different sensor label, edit `THERMO_TEMP_COMMAND` in `/etc/thermo-agent.env` and restart:
 
 ```bash
-export THERMO_AGENT_API_KEY='replace-with-a-long-random-secret'
-export THERMO_TEMP_COMMAND="sensors | awk '/Package id 0|Tctl|CPU/ {print \$0; exit}' | grep -oE '[+-]?[0-9]+(\.[0-9]+)?°C' | head -n1 | tr -d '+°C'"
-/opt/thermo-agent/.venv/bin/uvicorn agent.main:app --host 192.168.1.10 --port 8090
+sudo systemctl restart thermo-agent.service
 ```
 
-Replace `192.168.1.10` with the server LAN IP.
+## TrueNAS CORE / FreeBSD Agent
 
-Create a systemd service:
+Use the wizard to generate the command, but keep expectations practical: TrueNAS CORE is FreeBSD-based, may not use Docker natively, and service setup can depend on jails and local TrueNAS configuration.
 
-```bash
-sudo tee /etc/systemd/system/thermo-agent.service >/dev/null <<'EOF'
-[Unit]
-Description=Thermo temperature agent
-After=network-online.target
-Wants=network-online.target
+The installer will try to:
 
-[Service]
-Type=simple
-WorkingDirectory=/opt/thermo-agent
-Environment="THERMO_AGENT_API_KEY=replace-with-a-long-random-secret"
-Environment="THERMO_TEMP_COMMAND=sensors | awk '/Package id 0|Tctl|CPU/ {print $0; exit}' | grep -oE '[+-]?[0-9]+(\.[0-9]+)?°C' | head -n1 | tr -d '+°C'"
-Environment="THERMO_TEMP_TIMEOUT_SECONDS=3"
-ExecStart=/opt/thermo-agent/.venv/bin/uvicorn agent.main:app --host 192.168.1.10 --port 8090
-Restart=on-failure
-RestartSec=5
+- install Python/curl/tar dependencies with `pkg` when available
+- install the agent into `/usr/local/thermo-agent`
+- create `/usr/local/etc/thermo-agent.env`
+- create an rc.d service when supported
+- print a manual run command if no supported service manager is available
 
-[Install]
-WantedBy=multi-user.target
-EOF
-```
-
-Enable it:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now thermo-agent.service
-sudo systemctl status thermo-agent.service
-```
-
-Test from the central Thermo host:
-
-```bash
-curl http://192.168.1.10:8090/health
-curl -H 'X-API-Key: replace-with-a-long-random-secret' http://192.168.1.10:8090/temperature
-```
-
-## TrueNAS CORE / FreeBSD Agent Install
-
-TrueNAS CORE is FreeBSD-based and may not run Docker natively. Do not assume systemd. A practical approach is to run the Thermo agent directly with Python, preferably inside a jail or another service location you control.
-
-Example layout:
-
-```sh
-mkdir -p /usr/local/thermo-agent
-cp -R agent /usr/local/thermo-agent/
-cd /usr/local/thermo-agent
-python3 -m venv .venv
-./.venv/bin/pip install -r agent/requirements.txt
-```
-
-Test the FreeBSD temperature command:
+The FreeBSD temperature command is:
 
 ```sh
 sysctl -n dev.cpu.0.temperature | sed 's/C//'
 ```
 
-Run manually:
+If TrueNAS exposes temperature through a different sysctl path, update `THERMO_TEMP_COMMAND` in `/usr/local/etc/thermo-agent.env`.
 
-```sh
-export THERMO_AGENT_API_KEY='replace-with-a-long-random-secret'
-export THERMO_TEMP_COMMAND="sysctl -n dev.cpu.0.temperature | sed 's/C//'"
-./.venv/bin/uvicorn agent.main:app --host 192.168.1.30 --port 8090
-```
+## Testing an Agent
 
-Replace `192.168.1.30` with the TrueNAS/jail LAN IP.
-
-For a simple FreeBSD-style service, create a wrapper script:
-
-```sh
-cat >/usr/local/thermo-agent/run-agent.sh <<'EOF'
-#!/bin/sh
-export THERMO_AGENT_API_KEY='replace-with-a-long-random-secret'
-export THERMO_TEMP_COMMAND="sysctl -n dev.cpu.0.temperature | sed 's/C//'"
-export THERMO_TEMP_TIMEOUT_SECONDS=3
-cd /usr/local/thermo-agent
-exec ./.venv/bin/uvicorn agent.main:app --host 192.168.1.30 --port 8090
-EOF
-chmod 700 /usr/local/thermo-agent/run-agent.sh
-```
-
-An rc.d wrapper can run that script in a FreeBSD jail or host environment where custom services are appropriate:
-
-```sh
-cat >/usr/local/etc/rc.d/thermo_agent <<'EOF'
-#!/bin/sh
-# PROVIDE: thermo_agent
-# REQUIRE: NETWORKING
-# KEYWORD: shutdown
-
-. /etc/rc.subr
-
-name="thermo_agent"
-rcvar="thermo_agent_enable"
-pidfile="/var/run/${name}.pid"
-command="/usr/sbin/daemon"
-command_args="-f -p ${pidfile} /usr/local/thermo-agent/run-agent.sh"
-
-load_rc_config $name
-: ${thermo_agent_enable:="NO"}
-
-run_rc_command "$1"
-EOF
-chmod 755 /usr/local/etc/rc.d/thermo_agent
-sysrc thermo_agent_enable=YES
-service thermo_agent start
-```
-
-TrueNAS CORE service setup can vary by release, boot environment, and whether you use jails. Keep the manual command working first, then adapt the service approach to your TrueNAS configuration.
-
-## Optional Agent Docker
-
-Docker is optional for agents and is not required for TrueNAS CORE:
+From the central Thermo host:
 
 ```bash
-docker build -f agent/Dockerfile -t thermo-agent .
-docker run --rm -p 8090:8989 \
-  -e THERMO_AGENT_API_KEY='replace-with-a-long-random-secret' \
-  -e THERMO_TEMP_COMMAND='echo 42.5' \
-  thermo-agent
+curl http://192.168.1.10:8090/health
+curl -H 'X-API-Key: replace-with-agent-key' http://192.168.1.10:8090/temperature
 ```
 
-Then add this URL in Thermo admin:
+The installer tests these locally during setup. The saved permanent API key is not shown in full in the admin UI after registration.
+
+## Existing Manual CRUD
+
+Manual server management is still available at:
 
 ```text
-http://agent-host-ip:8090/temperature
+/admin/servers
 ```
+
+Use it for advanced cases, corrections, or deleting servers. Saved API keys are masked in the UI.
+
+## API
+
+Dashboard data is available at:
+
+```text
+GET /api/status
+```
+
+This endpoint never exposes agent API keys or pairing secrets.
 
 ## Security Checklist
 
-- Use long random API keys for every agent.
-- Use a long random `THERMO_SECRET_KEY`.
+- No SSH is required or used.
+- Use HTTPS or a reverse proxy if the dashboard is reachable outside your LAN.
 - Change `THERMO_ADMIN_PASSWORD` immediately.
+- Set a long random `THERMO_SECRET_KEY`.
+- Use long random agent API keys.
+- Pairing tokens are short-lived, single-use, revocable, and stored hashed.
 - Do not expose agent ports to the public internet.
 - Firewall each agent so only the central Thermo server IP can connect.
-- Prefer binding agents to LAN/private IPs, not `0.0.0.0`, where practical.
-- Use HTTPS through a reverse proxy if the dashboard is reachable outside your LAN.
-- Keep the central SQLite database in `./data` backed up if the data matters.
+- Prefer binding agents to LAN/private IPs.
 
-Example Debian firewall rule with UFW:
+Example UFW rule on a Debian/Proxmox agent:
 
 ```bash
 sudo ufw allow from 192.168.1.50 to any port 8090 proto tcp
@@ -344,13 +181,19 @@ Replace `192.168.1.50` with the central Thermo host IP.
 Central app does not start:
 
 - Run `docker compose logs -f thermo`.
+- Check `docker compose config`.
 - Check that `./data` is writable.
-- Check that `THERMO_SECRET_KEY` and admin environment values are set as intended.
 
 Cannot sign in:
 
 - Confirm `THERMO_ADMIN_USER` and `THERMO_ADMIN_PASSWORD`.
 - If a user already exists, changing env defaults will not rewrite that existing user.
+
+Generated command cannot register:
+
+- Confirm the `Thermo URL reachable from target` is reachable from the target server.
+- Confirm the pairing token has not expired or been revoked.
+- Generate a new wizard command if the token was already used.
 
 Agent shows offline:
 
@@ -361,15 +204,11 @@ Agent shows offline:
 
 Temperature command returns nothing:
 
-- On Debian/Proxmox, run `sensors` directly and adjust `THERMO_TEMP_COMMAND` for that hardware.
-- On TrueNAS CORE/FreeBSD, confirm `sysctl -n dev.cpu.0.temperature` exists. Some hardware exposes a different sensor path.
+- On Debian/Proxmox, run `sensors` directly and adjust `THERMO_TEMP_COMMAND`.
+- On TrueNAS CORE/FreeBSD, confirm `sysctl -n dev.cpu.0.temperature` exists.
 
-Wrong port:
+Ports:
 
 - Central Docker app: `http://host:8088`
 - Central container port: `8080`
 - Agent examples: `8090`
-
-## Firewall Notes
-
-Agents should only be reachable from the central Thermo app host, and each agent must require an API key through `X-API-Key`. Do not expose agent ports directly to the public internet.

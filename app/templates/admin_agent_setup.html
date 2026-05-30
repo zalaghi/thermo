@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="auth-panel server-form-panel" aria-labelledby="setup-title">
+    <div class="section-heading">
+      <p class="eyebrow">Admin</p>
+      <h2 id="setup-title">Add Server Wizard</h2>
+      <p>Generate a short-lived install command for a temperature agent.</p>
+    </div>
+
+    {% if errors %}
+      <div class="form-error" role="alert">
+        {% for error in errors %}
+          <p>{{ error }}</p>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {% if command %}
+      <div class="setup-command-panel" aria-live="polite">
+        <h3>One-line install command</h3>
+        <p>This command contains a single-use pairing token that expires in {{ pairing_ttl_minutes }} minutes.</p>
+        <pre><code>{{ command }}</code></pre>
+        <div class="action-row">
+          <button type="button" data-copy-command>Copy command</button>
+          <form class="inline-form" method="post" action="/admin/setup-agent/{{ generated_pairing_id }}/revoke">
+            <input name="csrf_token" type="hidden" value="{{ csrf_token }}">
+            <button class="button-danger" type="submit">Revoke token</button>
+          </form>
+          <a class="button-link" href="/admin/setup-agent">Create another</a>
+        </div>
+        <p class="field-note" data-copy-feedback hidden></p>
+      </div>
+    {% endif %}
+
+    <form class="form-stack" method="post" action="/admin/setup-agent">
+      <input name="csrf_token" type="hidden" value="{{ csrf_token }}">
+
+      <label>
+        <span>Target platform</span>
+        <select name="platform" required>
+          {% for value, label in platform_choices %}
+            <option value="{{ value }}" {% if form_data.platform == value %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label>
+        <span>Server name</span>
+        <input name="server_name" type="text" value="{{ form_data.server_name }}" placeholder="Proxmox-1" required>
+      </label>
+
+      <label>
+        <span>Thermo URL reachable from target</span>
+        <input name="thermo_url" type="url" inputmode="url" value="{{ form_data.thermo_url }}" placeholder="http://192.168.1.50:8088" required>
+      </label>
+
+      <div class="form-grid">
+        <label>
+          <span>Agent bind host</span>
+          <input name="bind_host" type="text" value="{{ form_data.bind_host }}" placeholder="192.168.1.10" required>
+        </label>
+
+        <label>
+          <span>Agent port</span>
+          <input name="agent_port" type="number" min="1" max="65535" inputmode="numeric" value="{{ form_data.agent_port }}" required>
+        </label>
+      </div>
+
+      <div class="form-grid">
+        <label>
+          <span>Warning threshold</span>
+          <input name="warning_threshold" type="number" step="0.1" inputmode="decimal" value="{{ form_data.warning_threshold }}" required>
+        </label>
+
+        <label>
+          <span>Critical threshold</span>
+          <input name="critical_threshold" type="number" step="0.1" inputmode="decimal" value="{{ form_data.critical_threshold }}" required>
+        </label>
+      </div>
+
+      <div class="action-row">
+        <button type="submit">Generate command</button>
+        <a class="button-link" href="/admin">Cancel</a>
+      </div>
+    </form>
+  </section>
+
+  {% if active_pairings %}
+    <section class="server-list" aria-label="Active pairing tokens">
+      <h3>Active pairing tokens</h3>
+      {% for pairing in active_pairings %}
+        <article class="server-card">
+          <div class="server-card-header">
+            <div>
+              <h3>{{ pairing.server_name }}</h3>
+              <p>{{ pairing.bind_host }}:{{ pairing.agent_port }} · {{ pairing.platform }}</p>
+            </div>
+            <span class="status-pill">Expires {{ pairing.expires_at }}</span>
+          </div>
+          <form class="inline-form" method="post" action="/admin/setup-agent/{{ pairing.id }}/revoke">
+            <input name="csrf_token" type="hidden" value="{{ csrf_token }}">
+            <button class="button-danger" type="submit">Revoke</button>
+          </form>
+        </article>
+      {% endfor %}
+    </section>
+  {% endif %}
+{% endblock %}
+
+{% block scripts %}
+  <script src="{{ url_for('static', path='/js/admin_setup.js') }}" defer></script>
+{% endblock %}
