@@ -30,6 +30,8 @@
   const completedActions = detail.querySelector("[data-completed-actions]");
   const serverEditLink = detail.querySelector("[data-server-edit-link]");
   const revokeForm = detail.querySelector("[data-revoke-form]");
+  const stateMessage = detail.querySelector("[data-pairing-state-message]");
+  const newTokenActions = detail.querySelector("[data-new-token-actions]");
 
   async function loadPairingStatus() {
     try {
@@ -56,7 +58,7 @@
 
   function updateStatus(payload) {
     if (statusLabel) {
-      statusLabel.textContent = payload.status || "Waiting";
+      statusLabel.textContent = payload.status_label || payload.status || "Waiting";
       statusLabel.className = "status-pill";
     }
 
@@ -73,6 +75,14 @@
       completedActions.hidden = !payload.completed;
     }
 
+    if (stateMessage) {
+      stateMessage.textContent = statusMessage(payload);
+    }
+
+    if (newTokenActions) {
+      newTokenActions.hidden = !(payload.failed || payload.expired);
+    }
+
     if (serverEditLink && payload.server_edit_url) {
       serverEditLink.setAttribute("href", payload.server_edit_url);
     }
@@ -80,6 +90,22 @@
     if (revokeForm && !payload.can_revoke) {
       revokeForm.hidden = true;
     }
+  }
+
+  function statusMessage(payload) {
+    if (payload.completed) {
+      return "Agent registered successfully.";
+    }
+    if (payload.failed) {
+      return "Setup failed. Review the error and create a new token if needed.";
+    }
+    if (payload.expired) {
+      return "Pairing token expired.";
+    }
+    if (payload.revoked) {
+      return "Pairing token revoked.";
+    }
+    return "Waiting for agent...";
   }
 
   const timer = window.setInterval(loadPairingStatus, 3000);

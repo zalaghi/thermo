@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block content %}
-  <section class="auth-panel server-form-panel setup-detail" aria-labelledby="setup-detail-title" data-pairing-status-url="/admin/setup-agent/{{ pairing.id }}">
+  <section class="auth-panel server-form-panel setup-detail" aria-labelledby="setup-detail-title" data-pairing-status-url="/api/setup/status/{{ pairing.id }}">
     <div class="section-heading">
       <p class="eyebrow">Install Agent</p>
       <h2 id="setup-detail-title">{{ pairing.server_name }}</h2>
@@ -10,7 +10,7 @@
 
     <div class="setup-status-panel status-{{ status.status_key }}">
       <div>
-        <span class="status-pill" data-pairing-status>{{ status.status }}</span>
+        <span class="status-pill" data-pairing-status>{{ status.status_label }}</span>
         <p>Token ends {{ pairing.display_token_suffix }} · expires {{ pairing.expires_at }}</p>
       </div>
       {% if status.last_error %}
@@ -18,6 +18,19 @@
       {% else %}
         <p class="temperature-error" data-pairing-error hidden></p>
       {% endif %}
+      <p class="field-note" data-pairing-state-message>
+        {% if status.completed %}
+          Agent registered successfully.
+        {% elif status.failed %}
+          Setup failed. Review the error and create a new token if needed.
+        {% elif status.expired %}
+          Pairing token expired.
+        {% elif status.revoked %}
+          Pairing token revoked.
+        {% else %}
+          Waiting for agent...
+        {% endif %}
+      </p>
     </div>
 
     {% if install_commands %}
@@ -31,6 +44,7 @@
       <div class="setup-command-panel">
         <h3>FreeBSD / TrueNAS CORE</h3>
         <p>Use one of these when sudo is unavailable.</p>
+        <p class="field-note">Recommended: run this in a FreeBSD jail only if the jail can access the required temperature sensor. Otherwise run on the TrueNAS host with care.</p>
         <pre><code id="freebsd-fetch-command">{{ install_commands.freebsd_fetch }}</code></pre>
         <button type="button" data-copy-target="#freebsd-fetch-command">Copy fetch command</button>
         <pre><code id="freebsd-curl-command">{{ install_commands.freebsd_curl }}</code></pre>
@@ -53,6 +67,10 @@
     <div class="action-row" data-completed-actions {% if not status.completed %}hidden{% endif %}>
       <a class="button-link" href="/">Open dashboard</a>
       <a class="button-link" data-server-edit-link href="{{ status.server_edit_url or '#' }}">Edit server</a>
+    </div>
+
+    <div class="action-row" data-new-token-actions {% if not status.failed and not status.expired %}hidden{% endif %}>
+      <a class="button-link" href="/admin/setup-agent?copy_from={{ pairing.id }}">Create new token with same values</a>
     </div>
 
     {% if status.can_revoke %}

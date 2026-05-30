@@ -207,7 +207,8 @@ def pairing_status_payload(pairing: PairingToken) -> dict[str, object]:
     return {
         "id": pairing.id,
         "server_name": pairing.server_name,
-        "status": status.label,
+        "status": status.key,
+        "status_label": status.label,
         "status_key": status.key,
         "completed": status.key == "completed",
         "revoked": status.key == "revoked",
@@ -218,6 +219,7 @@ def pairing_status_payload(pairing: PairingToken) -> dict[str, object]:
         "expires_at": format_datetime(pairing.expires_at),
         "completed_at": format_datetime(pairing.completed_at),
         "server_id": pairing.created_server_id,
+        "created_server_id": pairing.created_server_id,
         "server_edit_url": f"/admin/servers/{pairing.created_server_id}/edit" if pairing.created_server_id else None,
         "dashboard_url": "/",
         "last_error": pairing.last_error,
@@ -268,23 +270,39 @@ def complete_pairing_setup(
         raise PairingError("Installer submitted an invalid agent URL.")
 
     temperature = payload.get("temperature")
-    if temperature is not None and not is_numeric(temperature):
-        record_pairing_error(pairing, "Installer submitted an invalid temperature.")
-        raise PairingError("Installer submitted an invalid temperature.")
+    if temperature is None or not is_numeric(temperature):
+        record_pairing_error(pairing, "Installer did not submit a successful local temperature test.")
+        raise PairingError("Installer did not submit a successful local temperature test.")
 
-    server = Server(
-        name=pairing.server_name,
-        url=agent_url,
-        api_key=agent_api_key,
-        warning_threshold=pairing.warning_threshold,
-        critical_threshold=pairing.critical_threshold,
-        enabled=True,
-    )
-    session.add(server)
+    detected_hostname = clean_optional_string(payload.get("detected_hostname"))
+    server_name = clean_optional_string(pairing.server_name) or detected_hostname or "Thermo Agent"
+    existing_server = session.scalar(select(Server).where(Server.url == agent_url).order_by(Server.id))
+    if existing_server and existing_server.id != pairing.created_server_id:
+        record_pairing_error(pairing, "A server with this agent URL already exists.")
+        raise PairingConflict("A server with this agent URL already exists.")
+
+    if existing_server:
+        server = existing_server
+        server.name = server_name
+        server.url = agent_url
+        server.api_key = agent_api_key
+        server.warning_threshold = pairing.warning_threshold
+        server.critical_threshold = pairing.critical_threshold
+        server.enabled = True
+    else:
+        server = Server(
+            name=server_name,
+            url=agent_url,
+            api_key=agent_api_key,
+            warning_threshold=pairing.warning_threshold,
+            critical_threshold=pairing.critical_threshold,
+            enabled=True,
+        )
+        session.add(server)
     session.flush()
 
     now = utc_now()
-    pairing.detected_hostname = clean_optional_string(payload.get("detected_hostname"))
+    pairing.detected_hostname = detected_hostname
     pairing.detected_platform = clean_optional_string(payload.get("detected_platform"))
     pairing.detected_ip = clean_optional_string(payload.get("detected_ip"))
     pairing.created_server_id = server.id
@@ -421,4 +439,8 @@ def utc_now() -> datetime:
 
 
 class PairingError(Exception):
+    pass
+
+
+class PairingConflict(PairingError):
     pass

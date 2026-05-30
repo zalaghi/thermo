@@ -21,6 +21,7 @@ from .models import PairingToken, Server, User
 from .polling import get_status_payload, polling_loop
 from .setup_wizard import (
     PLATFORM_CHOICES,
+    PairingConflict,
     PairingError,
     bootstrap_pairing,
     complete_pairing_setup,
@@ -125,6 +126,20 @@ def create_app() -> FastAPI:
 
         return bootstrap_payload or {}
 
+    @app.get("/api/setup/status/{pairing_id}")
+    async def api_setup_status(request: Request, pairing_id: int) -> dict[str, object]:
+        if not is_authenticated(request):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Admin login required.",
+            )
+
+        with session_scope() as session:
+            pairing = session.get(PairingToken, pairing_id)
+            if not pairing:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pairing token not found")
+            return pairing_status_payload(pairing)
+
     @app.post("/api/setup/complete")
     async def api_setup_complete(request: Request) -> dict[str, object]:
         try:
@@ -150,6 +165,7 @@ def create_app() -> FastAPI:
 
         server_payload = None
         setup_error = None
+        setup_status = status.HTTP_401_UNAUTHORIZED
         with session_scope() as session:
             try:
                 server = complete_pairing_setup(
@@ -163,13 +179,17 @@ def create_app() -> FastAPI:
                     "server_name": server.name,
                     "agent_url": server.url,
                 }
+            except PairingConflict as exc:
+                setup_error = str(exc)
+                setup_status = status.HTTP_409_CONFLICT
             except PairingError as exc:
                 setup_error = str(exc)
+                setup_status = status.HTTP_401_UNAUTHORIZED
 
         if setup_error:
             logger.warning("Thermo setup completion failed: %s", setup_error)
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
+                status_code=setup_status,
                 detail=setup_error,
             )
 
@@ -248,10 +268,18 @@ def create_app() -> FastAPI:
         if not is_authenticated(request):
             return redirect_to_login()
 
+        form_data = default_pairing_form_data(default_thermo_url(request))
+        copy_from = request.query_params.get("copy_from", "").strip()
+        if copy_from.isdigit():
+            with session_scope() as session:
+                pairing = session.get(PairingToken, int(copy_from))
+                if pairing:
+                    form_data = pairing_form_data_from_model(pairing)
+
         return render_agent_setup_form(
             request=request,
             settings=settings,
-            form_data=default_pairing_form_data(default_thermo_url(request)),
+            form_data=form_data,
             errors=[],
         )
 
@@ -667,6 +695,19 @@ def pairing_form_data_from_form(form: dict[str, list[str]]) -> dict[str, object]
         "agent_port": get_form_value(form, "agent_port").strip(),
         "warning_threshold": get_form_value(form, "warning_threshold").strip(),
         "critical_threshold": get_form_value(form, "critical_threshold").strip(),
+    }
+
+
+def pairing_form_data_from_model(pairing: PairingToken) -> dict[str, object]:
+    settings = get_settings()
+    return {
+        "server_name": pairing.server_name,
+        "platform": pairing.platform,
+        "thermo_url": settings.public_url or "",
+        "bind_host": pairing.bind_host,
+        "agent_port": str(pairing.agent_port),
+        "warning_threshold": format_threshold(pairing.warning_threshold),
+        "critical_threshold": format_threshold(pairing.critical_threshold),
     }
 
 

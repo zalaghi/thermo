@@ -32,6 +32,7 @@
             <option value="{{ value }}" {% if form_data.platform == value %}selected{% endif %}>{{ label }}</option>
           {% endfor %}
         </select>
+        <span class="field-note">TrueNAS CORE note: Recommended: run this in a FreeBSD jail only if the jail can access the required temperature sensor. Otherwise run on the TrueNAS host with care.</span>
       </label>
 
       <label>
