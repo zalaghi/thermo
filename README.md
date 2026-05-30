@@ -38,7 +38,7 @@ The central container listens on `8080`, the host exposes `8088`, and SQLite is 
 7. Run it on the target server.
 8. Return to `/` to see the live temperature card.
 
-The setup command contains a short-lived single-use pairing token. It does not contain the permanent agent API key. Thermo generates the permanent API key during registration, stores it, and returns it only to the installer.
+The setup command contains a short-lived single-use pairing token. It does not contain the permanent agent API key. Thermo generates the permanent API key during bootstrap, then stores it on the server record when setup completes.
 
 ## Agent Setup Wizard
 
@@ -63,13 +63,14 @@ The installer downloads Thermo source from:
 https://github.com/zalaghi/thermo/archive/refs/heads/main.tar.gz
 ```
 
-The target server registers back with:
+The target server bootstraps and completes setup with:
 
 ```text
-POST /api/setup/register
+GET /api/setup/bootstrap?token=<pairing-token>
+POST /api/setup/complete
 ```
 
-Registration creates or updates the saved server entry using the wizard values.
+Completion creates the saved server entry using the pairing values.
 
 ## Proxmox / Debian / Ubuntu Agent
 

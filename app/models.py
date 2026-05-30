@@ -61,19 +61,29 @@ class LatestStatus(Base):
     server: Mapped[Server] = relationship(back_populates="latest_status")
 
 
-class PairingToken(Base):
-    __tablename__ = "pairing_tokens"
+class AgentPairingToken(Base):
+    __tablename__ = "agent_pairing_tokens"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
-    platform: Mapped[str] = mapped_column(String(50), nullable=False)
+    display_token_suffix: Mapped[str] = mapped_column(String(12), nullable=False)
     server_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    platform: Mapped[str] = mapped_column(String(50), nullable=False)
     bind_host: Mapped[str] = mapped_column(String(255), nullable=False)
     agent_port: Mapped[int] = mapped_column(Integer, nullable=False)
     warning_threshold: Mapped[float] = mapped_column(Float, default=65.0, nullable=False)
     critical_threshold: Mapped[float] = mapped_column(Float, default=80.0, nullable=False)
-    server_id: Mapped[Optional[int]] = mapped_column(ForeignKey("servers.id"))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    generated_agent_api_key_encrypted_or_temporary: Mapped[Optional[str]] = mapped_column(Text)
+    detected_hostname: Mapped[Optional[str]] = mapped_column(String(255))
+    detected_platform: Mapped[Optional[str]] = mapped_column(String(255))
+    detected_ip: Mapped[Optional[str]] = mapped_column(String(255))
+    created_server_id: Mapped[Optional[int]] = mapped_column(ForeignKey("servers.id"))
+    last_error: Mapped[Optional[str]] = mapped_column(Text)
+
+
+PairingToken = AgentPairingToken

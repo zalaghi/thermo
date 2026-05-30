@@ -16,20 +16,9 @@
       </div>
     {% endif %}
 
-    {% if command %}
-      <div class="setup-command-panel" aria-live="polite">
-        <h3>One-line install command</h3>
-        <p>This command contains a single-use pairing token that expires in {{ pairing_ttl_minutes }} minutes.</p>
-        <pre><code>{{ command }}</code></pre>
-        <div class="action-row">
-          <button type="button" data-copy-command>Copy command</button>
-          <form class="inline-form" method="post" action="/admin/setup-agent/{{ generated_pairing_id }}/revoke">
-            <input name="csrf_token" type="hidden" value="{{ csrf_token }}">
-            <button class="button-danger" type="submit">Revoke token</button>
-          </form>
-          <a class="button-link" href="/admin/setup-agent">Create another</a>
-        </div>
-        <p class="field-note" data-copy-feedback hidden></p>
+    {% if public_url_missing %}
+      <div class="form-warning" role="alert">
+        <p>THERMO_PUBLIC_URL is not configured. Set it to the Thermo URL reachable from target servers, for example http://192.168.1.50:8088.</p>
       </div>
     {% endif %}
 
@@ -50,15 +39,11 @@
         <input name="server_name" type="text" value="{{ form_data.server_name }}" placeholder="Proxmox-1" required>
       </label>
 
-      <label>
-        <span>Thermo URL reachable from target</span>
-        <input name="thermo_url" type="url" inputmode="url" value="{{ form_data.thermo_url }}" placeholder="http://192.168.1.50:8088" required>
-      </label>
-
       <div class="form-grid">
         <label>
           <span>Agent bind host</span>
           <input name="bind_host" type="text" value="{{ form_data.bind_host }}" placeholder="192.168.1.10" required>
+          <span class="field-note">Use a LAN/private IP where possible.</span>
         </label>
 
         <label>
@@ -94,14 +79,17 @@
           <div class="server-card-header">
             <div>
               <h3>{{ pairing.server_name }}</h3>
-              <p>{{ pairing.bind_host }}:{{ pairing.agent_port }} · {{ pairing.platform }}</p>
+              <p>{{ pairing.bind_host }}:{{ pairing.agent_port }} · {{ pairing.platform }} · token ends {{ pairing.display_token_suffix }}</p>
             </div>
-            <span class="status-pill">Expires {{ pairing.expires_at }}</span>
+            <span class="status-pill">Waiting</span>
           </div>
-          <form class="inline-form" method="post" action="/admin/setup-agent/{{ pairing.id }}/revoke">
-            <input name="csrf_token" type="hidden" value="{{ csrf_token }}">
-            <button class="button-danger" type="submit">Revoke</button>
-          </form>
+          <div class="action-row">
+            <a class="button-link" href="/admin/setup-agent/{{ pairing.id }}">Open setup</a>
+            <form class="inline-form" method="post" action="/admin/setup-agent/{{ pairing.id }}/revoke">
+              <input name="csrf_token" type="hidden" value="{{ csrf_token }}">
+              <button class="button-danger" type="submit">Revoke</button>
+            </form>
+          </div>
         </article>
       {% endfor %}
     </section>

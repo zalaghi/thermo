@@ -20,15 +20,16 @@ from .db import init_db, session_scope
 from .models import PairingToken, Server, User
 from .polling import get_status_payload, polling_loop
 from .setup_wizard import (
-    PAIRING_TOKEN_TTL_MINUTES,
     PLATFORM_CHOICES,
     PairingError,
-    complete_pairing_registration,
+    bootstrap_pairing,
+    complete_pairing_setup,
     create_pairing,
     default_pairing_form_data,
-    is_expired,
+    list_active_pairings,
+    pairing_status_payload,
+    revoke_pairing,
     validate_pairing_form,
-    utc_now,
 )
 from .settings import get_settings
 
@@ -94,8 +95,38 @@ def create_app() -> FastAPI:
     async def api_status() -> list[dict[str, object]]:
         return get_status_payload()
 
-    @app.post("/api/setup/register")
-    async def api_setup_register(request: Request) -> dict[str, object]:
+    @app.get("/api/setup/bootstrap")
+    async def api_setup_bootstrap(request: Request, token: str = "") -> dict[str, object]:
+        raw_token = token.strip()
+        if not raw_token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Pairing token is required.",
+            )
+
+        bootstrap_payload = None
+        setup_error = None
+        with session_scope() as session:
+            try:
+                bootstrap_payload = bootstrap_pairing(
+                    session=session,
+                    raw_token=raw_token,
+                    central_url=default_thermo_url(request),
+                )
+            except PairingError as exc:
+                setup_error = str(exc)
+
+        if setup_error:
+            logger.warning("Thermo setup bootstrap failed: %s", setup_error)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=setup_error,
+            )
+
+        return bootstrap_payload or {}
+
+    @app.post("/api/setup/complete")
+    async def api_setup_complete(request: Request) -> dict[str, object]:
         try:
             payload = await request.json()
         except ValueError as exc:
@@ -104,32 +135,52 @@ def create_app() -> FastAPI:
                 detail="Invalid JSON body.",
             ) from exc
 
-        raw_token = str(payload.get("pairing_token", "")).strip() if isinstance(payload, dict) else ""
+        if not isinstance(payload, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid JSON body.",
+            )
+
+        raw_token = str(payload.get("token", "")).strip()
         if not raw_token:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Pairing token is required.",
             )
 
+        server_payload = None
+        setup_error = None
         with session_scope() as session:
             try:
-                server, agent_api_key = complete_pairing_registration(
+                server = complete_pairing_setup(
                     session=session,
                     raw_token=raw_token,
+                    payload=payload,
                 )
+                server_payload = {
+                    "ok": True,
+                    "server_id": server.id,
+                    "server_name": server.name,
+                    "agent_url": server.url,
+                }
             except PairingError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=str(exc),
-                ) from exc
+                setup_error = str(exc)
 
-            return {
-                "ok": True,
-                "server_id": server.id,
-                "server_name": server.name,
-                "agent_url": server.url,
-                "agent_api_key": agent_api_key,
-            }
+        if setup_error:
+            logger.warning("Thermo setup completion failed: %s", setup_error)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=setup_error,
+            )
+
+        return server_payload or {}
+
+    @app.post("/api/setup/register")
+    async def api_setup_register_legacy() -> dict[str, object]:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Use /api/setup/bootstrap and /api/setup/complete.",
+        )
 
     @app.get("/admin/login", response_class=HTMLResponse)
     async def admin_login(request: Request) -> Response:
@@ -202,7 +253,6 @@ def create_app() -> FastAPI:
             settings=settings,
             form_data=default_pairing_form_data(default_thermo_url(request)),
             errors=[],
-            command=None,
         )
 
     @app.post("/admin/setup-agent", response_class=HTMLResponse)
@@ -222,25 +272,44 @@ def create_app() -> FastAPI:
                 settings=settings,
                 form_data=form_data,
                 errors=errors,
-                command=None,
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
         with session_scope() as session:
             result = create_pairing(session=session, values=values)
-            pairing_id = result.pairing.id
-            expires_at = result.pairing.expires_at
-            command = result.command
+            pairing = result.pairing
+            install_commands = {
+                "linux": result.linux_command,
+                "freebsd_fetch": result.freebsd_fetch_command,
+                "freebsd_curl": result.freebsd_curl_command,
+            }
 
-        return render_agent_setup_form(
+        return render_agent_setup_detail(
             request=request,
             settings=settings,
-            form_data=form_data,
-            errors=[],
-            command=command,
-            generated_pairing_id=pairing_id,
-            generated_expires_at=expires_at,
+            pairing=pairing,
+            install_commands=install_commands,
             status_code=status.HTTP_201_CREATED,
+        )
+
+    @app.get("/admin/setup-agent/{pairing_id}")
+    async def admin_setup_agent_detail(request: Request, pairing_id: int) -> Response:
+        if not is_authenticated(request):
+            return redirect_to_login()
+
+        with session_scope() as session:
+            pairing = session.get(PairingToken, pairing_id)
+            if not pairing:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pairing token not found")
+
+        if wants_json(request):
+            return pairing_status_payload(pairing)
+
+        return render_agent_setup_detail(
+            request=request,
+            settings=settings,
+            pairing=pairing,
+            install_commands=None,
         )
 
     @app.post("/admin/setup-agent/{pairing_id}/revoke")
@@ -253,13 +322,11 @@ def create_app() -> FastAPI:
             return PlainTextResponse("Invalid CSRF token", status_code=status.HTTP_400_BAD_REQUEST)
 
         with session_scope() as session:
-            pairing = session.get(PairingToken, pairing_id)
+            pairing = revoke_pairing(session=session, pairing_id=pairing_id)
             if not pairing:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pairing token not found")
-            if pairing.used_at is None and pairing.revoked_at is None:
-                pairing.revoked_at = utc_now()
 
-        return RedirectResponse("/admin/setup-agent", status_code=status.HTTP_303_SEE_OTHER)
+        return RedirectResponse(f"/admin/setup-agent/{pairing_id}", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.get("/admin/servers", response_class=HTMLResponse)
     async def admin_servers(request: Request) -> Response:
@@ -448,6 +515,10 @@ def default_thermo_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
+def wants_json(request: Request) -> bool:
+    return "application/json" in request.headers.get("accept", "")
+
+
 def get_csrf_token(request: Request) -> str:
     token = request.session.get("csrf_token")
     if not token:
@@ -587,10 +658,11 @@ def render_server_form(
 
 
 def pairing_form_data_from_form(form: dict[str, list[str]]) -> dict[str, object]:
+    settings = get_settings()
     return {
         "server_name": get_form_value(form, "server_name").strip(),
         "platform": get_form_value(form, "platform").strip(),
-        "thermo_url": get_form_value(form, "thermo_url").strip(),
+        "thermo_url": settings.public_url or "",
         "bind_host": get_form_value(form, "bind_host").strip(),
         "agent_port": get_form_value(form, "agent_port").strip(),
         "warning_threshold": get_form_value(form, "warning_threshold").strip(),
@@ -603,24 +675,10 @@ def render_agent_setup_form(
     settings,
     form_data: dict[str, object],
     errors: list[str],
-    command: Optional[str],
-    generated_pairing_id: Optional[int] = None,
-    generated_expires_at=None,
     status_code: int = status.HTTP_200_OK,
 ) -> Response:
     with session_scope() as session:
-        active_pairings = list(
-            session.scalars(
-                select(PairingToken)
-                .where(PairingToken.used_at.is_(None))
-                .where(PairingToken.revoked_at.is_(None))
-                .order_by(PairingToken.created_at.desc())
-            )
-        )
-        active_pairings = [
-            pairing for pairing in active_pairings
-            if not is_expired(pairing.expires_at)
-        ]
+        active_pairings = list_active_pairings(session)
 
     return templates.TemplateResponse(
         "admin_agent_setup.html",
@@ -629,12 +687,31 @@ def render_agent_setup_form(
             "settings": settings,
             "form_data": form_data,
             "errors": errors,
-            "command": command,
-            "generated_pairing_id": generated_pairing_id,
-            "generated_expires_at": generated_expires_at,
             "active_pairings": active_pairings,
             "platform_choices": PLATFORM_CHOICES,
-            "pairing_ttl_minutes": PAIRING_TOKEN_TTL_MINUTES,
+            "pairing_ttl_minutes": settings.pairing_token_ttl_minutes,
+            "public_url_missing": settings.public_url is None,
+            "csrf_token": get_csrf_token(request),
+        },
+        status_code=status_code,
+    )
+
+
+def render_agent_setup_detail(
+    request: Request,
+    settings,
+    pairing: PairingToken,
+    install_commands: Optional[dict[str, str]],
+    status_code: int = status.HTTP_200_OK,
+) -> Response:
+    return templates.TemplateResponse(
+        "admin_agent_setup_detail.html",
+        {
+            "request": request,
+            "settings": settings,
+            "pairing": pairing,
+            "status": pairing_status_payload(pairing),
+            "install_commands": install_commands,
             "csrf_token": get_csrf_token(request),
         },
         status_code=status_code,

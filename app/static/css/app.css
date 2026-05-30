@@ -410,12 +410,30 @@ p {
   font-size: 0.92rem;
 }
 
+.form-stack label .field-note {
+  margin: -0.15rem 0 0;
+  font-weight: 500;
+}
+
 .form-error {
   border: 1px solid rgba(255, 107, 107, 0.38);
   border-radius: 0.5rem;
   padding: 0.85rem 0.95rem;
   background: rgba(255, 107, 107, 0.12);
   color: #ffb7b7;
+}
+
+.form-warning {
+  border: 1px solid rgba(245, 189, 91, 0.36);
+  border-radius: 0.5rem;
+  padding: 0.85rem 0.95rem;
+  background: rgba(245, 189, 91, 0.1);
+  color: #ffd998;
+}
+
+.form-warning p {
+  margin-bottom: 0;
+  color: inherit;
 }
 
 .form-error p {
@@ -533,6 +551,48 @@ p {
 .setup-command-panel code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 0.9rem;
+}
+
+.setup-detail {
+  display: grid;
+  gap: 1rem;
+}
+
+.setup-status-panel {
+  display: grid;
+  gap: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  background: var(--surface-soft);
+}
+
+.setup-status-panel p {
+  margin: 0.65rem 0 0;
+}
+
+.setup-status-panel.status-completed {
+  border-color: rgba(114, 214, 163, 0.34);
+  background: rgba(114, 214, 163, 0.08);
+}
+
+.setup-status-panel.status-failed,
+.setup-status-panel.status-expired,
+.setup-status-panel.status-revoked {
+  border-color: rgba(255, 117, 111, 0.34);
+  background: rgba(255, 117, 111, 0.08);
+}
+
+.setup-steps {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding-left: 1.4rem;
+  color: var(--muted);
+}
+
+.setup-steps li {
+  padding-left: 0.25rem;
 }
 
 @media (min-width: 42rem) {
