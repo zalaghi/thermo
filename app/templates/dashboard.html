@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="dashboard-hero" aria-labelledby="dashboard-title">
+    <div>
+      <p class="eyebrow">Live temperatures</p>
+      <h2 id="dashboard-title">Servers</h2>
+    </div>
+    <p id="dashboard-updated" class="dashboard-updated" aria-live="polite">Syncing...</p>
+  </section>
+
+  <section id="dashboard-empty" class="empty-state" hidden>
+    <h3>No servers added yet.</h3>
+    <p>Add a temperature agent to start monitoring.</p>
+    <a class="button-link" href="/admin">Open admin</a>
+  </section>
+
+  <section id="temperature-grid" class="temperature-grid" aria-label="Temperature cards" aria-live="polite"></section>
+{% endblock %}
+
+{% block scripts %}
+  <script src="{{ url_for('static', path='/js/dashboard.js') }}" defer></script>
+{% endblock %}

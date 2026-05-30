@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="auth-panel" aria-labelledby="login-title">
+    <div class="section-heading">
+      <p class="eyebrow">Admin</p>
+      <h2 id="login-title">Sign in</h2>
+    </div>
+
+    {% if error %}
+      <p class="form-error" role="alert">{{ error }}</p>
+    {% endif %}
+
+    <form class="form-stack" method="post" action="/admin/login">
+      <input name="csrf_token" type="hidden" value="{{ csrf_token }}">
+
+      <label>
+        <span>Username</span>
+        <input name="username" type="text" autocomplete="username" required>
+      </label>
+
+      <label>
+        <span>Password</span>
+        <input name="password" type="password" autocomplete="current-password" required>
+      </label>
+
+      <button type="submit">Sign in</button>
+    </form>
+  </section>
+{% endblock %}

@@ -1,0 +1,17 @@
+services:
+  thermo:
+    build: .
+    container_name: thermo
+    ports:
+      - "8088:8080"
+    environment:
+      THERMO_ENV: production
+      THERMO_DB_PATH: /data/thermo.db
+      THERMO_ADMIN_USER: admin
+      THERMO_ADMIN_PASSWORD: change-me-now
+      THERMO_SECRET_KEY: change-me-to-a-long-random-secret
+      THERMO_POLL_INTERVAL: "5"
+      TZ: Asia/Tehran
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

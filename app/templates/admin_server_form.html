@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="auth-panel server-form-panel" aria-labelledby="server-form-title">
+    <div class="section-heading">
+      <p class="eyebrow">Admin</p>
+      <h2 id="server-form-title">{{ "Add server" if mode == "new" else "Edit server" }}</h2>
+    </div>
+
+    {% if errors %}
+      <div class="form-error" role="alert">
+        {% for error in errors %}
+          <p>{{ error }}</p>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    <form class="form-stack" method="post" action="{{ '/admin/servers/new' if mode == 'new' else '/admin/servers/' ~ server_id ~ '/edit' }}">
+      <input name="csrf_token" type="hidden" value="{{ csrf_token }}">
+
+      <label>
+        <span>Name</span>
+        <input name="name" type="text" value="{{ form_data.name }}" required>
+      </label>
+
+      <label>
+        <span>URL</span>
+        <input name="url" type="url" inputmode="url" value="{{ form_data.url }}" placeholder="http://192.168.1.10:8090/temperature" required>
+      </label>
+
+      <label>
+        <span>API key</span>
+        <input name="api_key" type="password" autocomplete="off" {% if mode == "new" %}required{% endif %}>
+      </label>
+
+      {% if mode == "edit" %}
+        <p class="field-note">Current key: {{ masked_api_key }}. Leave blank to keep it.</p>
+      {% endif %}
+
+      <div class="form-grid">
+        <label>
+          <span>Warning threshold</span>
+          <input name="warning_threshold" type="number" step="0.1" inputmode="decimal" value="{{ form_data.warning_threshold }}" required>
+        </label>
+
+        <label>
+          <span>Critical threshold</span>
+          <input name="critical_threshold" type="number" step="0.1" inputmode="decimal" value="{{ form_data.critical_threshold }}" required>
+        </label>
+      </div>
+
+      <label class="checkbox-row">
+        <input name="enabled" type="checkbox" {% if form_data.enabled %}checked{% endif %}>
+        <span>Enabled</span>
+      </label>
+
+      <div class="action-row">
+        <button type="submit">{{ "Create server" if mode == "new" else "Save changes" }}</button>
+        <a class="button-link" href="/admin/servers">Cancel</a>
+      </div>
+    </form>
+  </section>
+{% endblock %}

@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="intro" aria-labelledby="servers-title">
+    <div class="section-heading">
+      <p class="eyebrow">Admin</p>
+      <h2 id="servers-title">Servers</h2>
+    </div>
+    <p>Temperature agents configured for the dashboard.</p>
+    <div class="action-row">
+      <a class="button-link" href="/admin/servers/new">Add server</a>
+      <a class="button-link" href="/admin">Admin home</a>
+    </div>
+  </section>
+
+  <section class="server-list" aria-label="Configured servers">
+    {% if servers %}
+      {% for server in servers %}
+        <article class="server-card">
+          <div class="server-card-header">
+            <div>
+              <h3>{{ server.name }}</h3>
+              <p class="server-url">{{ server.url }}</p>
+            </div>
+            <span class="status-pill">{{ "Enabled" if server.enabled else "Disabled" }}</span>
+          </div>
+
+          <dl class="server-meta">
+            <div>
+              <dt>API key</dt>
+              <dd>{{ server.api_key|mask_api_key }}</dd>
+            </div>
+            <div>
+              <dt>Warning</dt>
+              <dd>{{ server.warning_threshold|format_threshold }}&deg;C</dd>
+            </div>
+            <div>
+              <dt>Critical</dt>
+              <dd>{{ server.critical_threshold|format_threshold }}&deg;C</dd>
+            </div>
+          </dl>
+
+          <div class="action-row">
+            <a class="button-link" href="/admin/servers/{{ server.id }}/edit">Edit</a>
+            <form class="inline-form" method="post" action="/admin/servers/{{ server.id }}/delete">
+              <input name="csrf_token" type="hidden" value="{{ csrf_token }}">
+              <button class="button-danger" type="submit">Delete</button>
+            </form>
+          </div>
+        </article>
+      {% endfor %}
+    {% else %}
+      <article class="server-card">
+        <h3>No servers configured</h3>
+        <p>Add your first temperature agent when ready.</p>
+      </article>
+    {% endif %}
+  </section>
+{% endblock %}
