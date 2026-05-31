@@ -47,6 +47,13 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertIn('systemctl start "$SERVICE_NAME"', start_service)
         self.assertNotIn('enable --now "$SERVICE_NAME"', start_service)
 
+    def test_env_file_uses_generated_temperature_script_not_shell_pipeline(self) -> None:
+        self.assertIn("write_temperature_command_script", self.script)
+        self.assertIn("printf '%s\\n' \"$TEMP_COMMAND\"", self.script)
+        self.assertIn("THERMO_TEMP_COMMAND=$temp_command_path", self.script)
+        self.assertIn("verify_agent_env_temperature_command", self.script)
+        self.assertNotIn("THERMO_TEMP_COMMAND=$temp_command_quoted", self.script)
+
 
 if __name__ == "__main__":
     unittest.main()

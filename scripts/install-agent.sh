@@ -771,9 +771,31 @@ validate_agent_api_key() {
   esac
 }
 
+temperature_command_script_path() {
+  printf '%s' "$INSTALL_DIR/read-temperature.sh"
+}
+
+write_temperature_command_script() {
+  command_script="$(temperature_command_script_path)"
+  log "Writing temperature command script $command_script..."
+  mkdir -p "$INSTALL_DIR"
+  umask 077
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' "$TEMP_COMMAND"
+  } >"$command_script"
+  chown "$(owner_group)" "$command_script"
+  chmod 700 "$command_script"
+}
+
 read_agent_api_key_from_env() {
   [ -f "$ENV_FILE" ] || return 1
   sed -n 's/^THERMO_AGENT_API_KEY=//p' "$ENV_FILE" | head -n 1 | strip_wrapping_quotes
+}
+
+read_temperature_command_from_env() {
+  [ -f "$ENV_FILE" ] || return 1
+  sed -n 's/^THERMO_TEMP_COMMAND=//p' "$ENV_FILE" | head -n 1 | strip_wrapping_quotes
 }
 
 verify_agent_api_key_env_consistency() {
@@ -789,21 +811,45 @@ verify_agent_api_key_env_consistency() {
   debug_log "Verified agent API key in $ENV_FILE: $(redacted_secret "$env_api_key")"
 }
 
+verify_agent_env_temperature_command() {
+  env_temp_command="$(read_temperature_command_from_env || true)"
+  expected_temp_command="$(temperature_command_script_path)"
+  if [ -z "$env_temp_command" ]; then
+    fail "Installer bug: THERMO_TEMP_COMMAND was not written to $ENV_FILE."
+  fi
+  if [ "$env_temp_command" != "$expected_temp_command" ]; then
+    log "Env-file temperature command: $env_temp_command"
+    log "Expected temperature command: $expected_temp_command"
+    fail "Installer bug: THERMO_TEMP_COMMAND does not point to the generated command script."
+  fi
+  if [ ! -x "$env_temp_command" ]; then
+    fail "Installer bug: temperature command script is not executable: $env_temp_command"
+  fi
+  value="$(command_temperature_value "$env_temp_command" || true)"
+  if [ -z "$value" ]; then
+    print_sensors_output
+    fail "Generated temperature command script did not return a numeric value."
+  fi
+  debug_log "Verified env temperature command script returned $value"
+}
+
 write_env_file() {
   log "Writing $ENV_FILE..."
   validate_agent_api_key
+  write_temperature_command_script
   mkdir -p "$(dirname "$ENV_FILE")"
-  temp_command_quoted="$(shell_quote "$TEMP_COMMAND")"
+  temp_command_path="$(temperature_command_script_path)"
 
   umask 077
   cat >"$ENV_FILE" <<EOF
 THERMO_AGENT_API_KEY=$AGENT_API_KEY
-THERMO_TEMP_COMMAND=$temp_command_quoted
+THERMO_TEMP_COMMAND=$temp_command_path
 THERMO_TEMP_TIMEOUT_SECONDS=3
 EOF
   chown "$(owner_group)" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   verify_agent_api_key_env_consistency
+  verify_agent_env_temperature_command
 }
 
 write_registration_retry_files() {

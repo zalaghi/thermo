@@ -163,7 +163,8 @@ Temperature command returns nothing:
 
 - On Debian/Proxmox, run `sensors` and confirm a CPU temperature is visible.
 - On FreeBSD/TrueNAS CORE, run `sysctl -n dev.cpu.0.temperature`.
-- If your hardware uses a different sensor path, edit `THERMO_TEMP_COMMAND` in the agent env file and restart the service.
+- The installer stores the selected sensor pipeline in `/opt/thermo-agent/read-temperature.sh` on Linux and points `THERMO_TEMP_COMMAND` at that script.
+- If your hardware uses a different sensor path, edit `/opt/thermo-agent/read-temperature.sh` and restart the service.
 
 Service does not start:
 
