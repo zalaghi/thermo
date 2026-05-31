@@ -16,6 +16,16 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from starlette.middleware.sessions import SessionMiddleware
 
+from .app_config import (
+    DEFAULT_BACKGROUND_COLOR,
+    UPLOAD_SETTING_FIELDS,
+    get_branding_upload_dir,
+    get_effective_app_config,
+    manifest_icon_type,
+    save_app_setting,
+    save_branding_upload,
+    validate_settings_form,
+)
 from .auth import hash_password, verify_password
 from .db import init_db, session_scope
 from .models import PairingToken, Server, User
@@ -32,7 +42,9 @@ from .setup_wizard import (
     list_active_pairings,
     pairing_status_payload,
     pairing_status_payload_with_server,
+    platform_label,
     revoke_pairing,
+    security_summary,
     validate_agent_temperature_url,
     validate_pairing_form,
 )
@@ -40,7 +52,13 @@ from .settings import get_settings
 
 
 APP_DIR = Path(__file__).resolve().parent
-templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
+
+
+def template_app_context(request: Request) -> dict[str, object]:
+    return {"app_config": get_effective_app_config(default_thermo_url(request))}
+
+
+templates = Jinja2Templates(directory=str(APP_DIR / "templates"), context_processors=[template_app_context])
 templates.env.filters["mask_api_key"] = lambda value: mask_api_key(value)
 templates.env.filters["format_threshold"] = lambda value: format_threshold(value)
 logger = logging.getLogger(__name__)
@@ -85,6 +103,11 @@ def create_app() -> FastAPI:
         StaticFiles(directory=str(APP_DIR / "static")),
         name="static",
     )
+    app.mount(
+        "/uploads",
+        StaticFiles(directory=str(get_branding_upload_dir().parent), check_dir=False),
+        name="uploads",
+    )
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request) -> HTMLResponse:
@@ -96,6 +119,31 @@ def create_app() -> FastAPI:
                 "servers": [],
             },
         )
+
+    @app.get("/manifest.webmanifest")
+    async def manifest(request: Request) -> dict[str, object]:
+        app_config = get_effective_app_config(default_thermo_url(request))
+        icon_path = app_config.app_icon_path or app_config.favicon_path
+        icons = []
+        if icon_path:
+            icons.append(
+                {
+                    "src": icon_path,
+                    "sizes": "any" if icon_path.lower().endswith(".svg") else "512x512",
+                    "type": manifest_icon_type(icon_path),
+                    "purpose": "any maskable",
+                }
+            )
+
+        return {
+            "name": app_config.app_name,
+            "short_name": app_config.app_name[:24],
+            "icons": icons,
+            "theme_color": app_config.accent_color,
+            "background_color": DEFAULT_BACKGROUND_COLOR,
+            "display": "standalone",
+            "start_url": "/",
+        }
 
     @app.get("/api/status")
     async def api_status() -> list[dict[str, object]]:
@@ -269,6 +317,76 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/admin/settings", response_class=HTMLResponse)
+    async def admin_settings(request: Request) -> Response:
+        if not is_authenticated(request):
+            return redirect_to_login()
+
+        return render_admin_settings(
+            request=request,
+            settings=settings,
+            errors=[],
+            warnings=[],
+            success_message=None,
+        )
+
+    @app.post("/admin/settings", response_class=HTMLResponse)
+    async def admin_settings_update(request: Request) -> Response:
+        if not is_authenticated(request):
+            return redirect_to_login()
+
+        form = await request.form()
+        if not has_valid_csrf_token_from_value(request, str(form.get("csrf_token", ""))):
+            return PlainTextResponse("Invalid CSRF token", status_code=status.HTTP_400_BAD_REQUEST)
+
+        result = validate_settings_form(
+            {
+                "app_name": str(form.get("app_name", "")),
+                "public_url": str(form.get("public_url", "")),
+                "accent_color": str(form.get("accent_color", "")),
+            }
+        )
+        errors = list(result.errors)
+        uploaded_paths: dict[str, str] = {}
+
+        for field_name, setting_key in UPLOAD_SETTING_FIELDS.items():
+            upload = form.get(field_name)
+            if upload is None or not getattr(upload, "filename", ""):
+                continue
+            path, upload_error = await save_branding_upload(upload, field_name.replace("_", " "))
+            if upload_error:
+                errors.append(upload_error)
+            elif path:
+                uploaded_paths[setting_key] = path
+
+        if errors:
+            return render_admin_settings(
+                request=request,
+                settings=settings,
+                errors=errors,
+                warnings=result.warnings,
+                success_message=None,
+                form_data={
+                    **settings_form_data_from_config(get_effective_app_config(default_thermo_url(request))),
+                    **result.values,
+                },
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with session_scope() as session:
+            for key in ("app_name", "public_url", "accent_color"):
+                save_app_setting(session, key, result.values.get(key, ""))
+            for key, path in uploaded_paths.items():
+                save_app_setting(session, key, path)
+
+        return render_admin_settings(
+            request=request,
+            settings=settings,
+            errors=[],
+            warnings=result.warnings,
+            success_message="Settings saved.",
+        )
+
     @app.get("/admin/setup-agent", response_class=HTMLResponse)
     async def admin_setup_agent(request: Request) -> Response:
         if not is_authenticated(request):
@@ -316,6 +434,9 @@ def create_app() -> FastAPI:
                 "linux": result.linux_command,
                 "freebsd_fetch": result.freebsd_fetch_command,
                 "freebsd_curl": result.freebsd_curl_command,
+                "synology_installer": result.synology_installer_command,
+                "synology_wget_installer": result.synology_wget_installer_command,
+                "synology_docker_build": result.synology_docker_build_command,
             }
 
         return render_agent_setup_detail(
@@ -323,6 +444,7 @@ def create_app() -> FastAPI:
             settings=settings,
             pairing=pairing,
             install_commands=install_commands,
+            security_summary_items=security_summary(values),
             status_code=status.HTTP_201_CREATED,
         )
 
@@ -594,8 +716,7 @@ def default_thermo_url(request: Request) -> str:
 
 
 def get_effective_public_url(request: Request) -> str:
-    settings = get_settings()
-    return settings.public_url or default_thermo_url(request)
+    return get_effective_app_config(default_thermo_url(request)).public_url
 
 
 def wants_json(request: Request) -> bool:
@@ -714,7 +835,7 @@ def validate_agent_url_for_manual_form(url: str, allow_missing_port: bool) -> li
     if parsed_port is None and host_is_ip_address(host) and not allow_missing_port:
         return [
             "Agent URL should include the agent port, for example "
-            "http://192.168.4.2:8090/temperature."
+            "http://AGENT-IP:8090/temperature."
         ]
 
     return []
@@ -833,11 +954,16 @@ def pairing_form_data_from_form(request: Request, form: dict[str, list[str]]) ->
         "agent_port": get_form_value(form, "agent_port").strip(),
         "warning_threshold": get_form_value(form, "warning_threshold").strip(),
         "critical_threshold": get_form_value(form, "critical_threshold").strip(),
+        "restrict_agent_to_thermo_ip": get_form_value(form, "restrict_agent_to_thermo_ip") == "on",
+        "allowed_client": get_form_value(form, "allowed_client").strip(),
+        "protect_health": get_form_value(form, "protect_health") == "on",
+        "rate_limit_per_minute": get_form_value(form, "rate_limit_per_minute").strip(),
     }
 
 
 def pairing_form_data_from_model(pairing: PairingToken, thermo_url: str) -> dict[str, object]:
-    return {
+    form_data = default_pairing_form_data(thermo_url)
+    form_data.update({
         "server_name": pairing.server_name,
         "platform": pairing.platform,
         "thermo_url": thermo_url,
@@ -845,7 +971,8 @@ def pairing_form_data_from_model(pairing: PairingToken, thermo_url: str) -> dict
         "agent_port": str(pairing.agent_port),
         "warning_threshold": format_threshold(pairing.warning_threshold),
         "critical_threshold": format_threshold(pairing.critical_threshold),
-    }
+    })
+    return form_data
 
 
 def render_agent_setup_form(
@@ -857,6 +984,7 @@ def render_agent_setup_form(
 ) -> Response:
     with session_scope() as session:
         active_pairings = list_active_pairings(session)
+    app_config = get_effective_app_config(default_thermo_url(request))
 
     return templates.TemplateResponse(
         "admin_agent_setup.html",
@@ -867,9 +995,10 @@ def render_agent_setup_form(
             "errors": errors,
             "active_pairings": active_pairings,
             "platform_choices": PLATFORM_CHOICES,
+            "platform_labels": dict(PLATFORM_CHOICES),
             "pairing_ttl_minutes": settings.pairing_token_ttl_minutes,
-            "public_url_is_fallback": settings.public_url is None,
-            "effective_public_url": get_effective_public_url(request),
+            "public_url_is_fallback": app_config.public_url_source == "request",
+            "effective_public_url": app_config.public_url,
             "csrf_token": get_csrf_token(request),
         },
         status_code=status_code,
@@ -881,9 +1010,11 @@ def render_agent_setup_detail(
     settings,
     pairing: PairingToken,
     install_commands: Optional[dict[str, str]],
+    security_summary_items: Optional[list[str]] = None,
     status_payload: Optional[dict[str, object]] = None,
     status_code: int = status.HTTP_200_OK,
 ) -> Response:
+    app_config = get_effective_app_config(default_thermo_url(request))
     return templates.TemplateResponse(
         "admin_agent_setup_detail.html",
         {
@@ -892,12 +1023,52 @@ def render_agent_setup_detail(
             "pairing": pairing,
             "status": status_payload or pairing_status_payload(pairing),
             "install_commands": install_commands,
-            "effective_public_url": get_effective_public_url(request),
+            "platform_label": platform_label(pairing.platform),
+            "security_summary_items": security_summary_items or [],
+            "effective_public_url": app_config.public_url,
             "target_agent_url_preview": f"http://TARGET-IP:{pairing.agent_port}/temperature",
             "csrf_token": get_csrf_token(request),
         },
         status_code=status_code,
     )
+
+
+def render_admin_settings(
+    request: Request,
+    settings,
+    errors: list[str],
+    warnings: list[str],
+    success_message: Optional[str],
+    form_data: Optional[dict[str, str]] = None,
+    status_code: int = status.HTTP_200_OK,
+) -> Response:
+    app_config = get_effective_app_config(default_thermo_url(request))
+    return templates.TemplateResponse(
+        "admin_settings.html",
+        {
+            "request": request,
+            "settings": settings,
+            "form_data": form_data or settings_form_data_from_config(app_config),
+            "errors": errors,
+            "warnings": warnings,
+            "success_message": success_message,
+            "detected_public_url": default_thermo_url(request),
+            "public_url_source": app_config.public_url_source,
+            "csrf_token": get_csrf_token(request),
+        },
+        status_code=status_code,
+    )
+
+
+def settings_form_data_from_config(app_config) -> dict[str, str]:
+    return {
+        "app_name": app_config.app_name,
+        "public_url": app_config.public_url if app_config.public_url_source != "request" else "",
+        "accent_color": app_config.accent_color,
+        "favicon_path": app_config.favicon_path,
+        "app_icon_path": app_config.app_icon_path,
+        "header_icon_path": app_config.header_icon_path,
+    }
 
 
 def mask_api_key(api_key: str) -> str:

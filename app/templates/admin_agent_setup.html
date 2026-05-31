@@ -23,8 +23,9 @@
     {% endif %}
 
     <div class="setup-summary">
-      <span>Central Thermo URL</span>
+      <span>Thermo URL used in installer command</span>
       <strong>{{ effective_public_url }}</strong>
+      <a href="/admin/settings">Edit in Settings</a>
     </div>
 
     <form class="form-stack" method="post" action="/admin/setup-agent">
@@ -37,7 +38,8 @@
             <option value="{{ value }}" {% if form_data.platform == value %}selected{% endif %}>{{ label }}</option>
           {% endfor %}
         </select>
-        <span class="field-note">TrueNAS CORE note: Recommended: run this in a FreeBSD jail only if the jail can access the required temperature sensor. Otherwise run on the TrueNAS host with care.</span>
+        <span class="field-note" data-platform-note="truenas_core" hidden>TrueNAS CORE note: Recommended: run this in a FreeBSD jail only if the jail can access the required temperature sensor. Otherwise run on the TrueNAS host with care.</span>
+        <span class="field-note" data-platform-note="synology_dsm" hidden>Synology DSM support is best-effort. Recommended install method: Docker/Container Manager if your Synology supports it. Alternative: DSM Task Scheduler user-defined script. Temperature sensor availability varies by Synology model. If the NAS does not expose a readable temperature command, Thermo cannot report it.</span>
       </label>
 
       <label>
@@ -48,7 +50,7 @@
       <div class="form-grid">
         <label>
           <span>Agent bind host</span>
-          <input name="bind_host" type="text" value="{{ form_data.bind_host }}" placeholder="192.168.1.10" required>
+          <input name="bind_host" type="text" value="{{ form_data.bind_host }}" placeholder="0.0.0.0 or LAN-IP" required>
           <span class="field-note">Use a LAN/private IP where possible.</span>
         </label>
 
@@ -70,6 +72,41 @@
         </label>
       </div>
 
+      <details class="setup-command-more">
+        <summary>Security options</summary>
+        <div class="form-stack">
+          <label class="checkbox-row">
+            <input
+              name="restrict_agent_to_thermo_ip"
+              type="checkbox"
+              {% if form_data.restrict_agent_to_thermo_ip %}checked{% endif %}
+            >
+            <span>Restrict agent to this Thermo server IP</span>
+          </label>
+
+          <label>
+            <span>Allowed Thermo server IP or CIDR</span>
+            <input name="allowed_client" type="text" value="{{ form_data.allowed_client }}" placeholder="THERMO-IP">
+            <span class="field-note">The installer writes this to THERMO_AGENT_ALLOWED_CLIENTS. Leave restriction off if your central URL uses a hostname.</span>
+          </label>
+
+          <label class="checkbox-row">
+            <input
+              name="protect_health"
+              type="checkbox"
+              {% if form_data.protect_health %}checked{% endif %}
+            >
+            <span>Protect /health with the agent API key</span>
+          </label>
+
+          <label>
+            <span>Rate limit per minute</span>
+            <input name="rate_limit_per_minute" type="number" min="1" max="10000" inputmode="numeric" value="{{ form_data.rate_limit_per_minute }}" required>
+            <span class="field-note">Default is 120 requests per client per minute.</span>
+          </label>
+        </div>
+      </details>
+
       <div class="action-row">
         <button type="submit">Generate command</button>
         <a class="button-link" href="/admin">Cancel</a>
@@ -85,7 +122,7 @@
           <div class="server-card-header">
             <div>
               <h3>{{ pairing.server_name }}</h3>
-              <p>{{ pairing.bind_host }}:{{ pairing.agent_port }} · {{ pairing.platform }} · token ends {{ pairing.display_token_suffix }}</p>
+              <p>{{ pairing.bind_host }}:{{ pairing.agent_port }} · {{ platform_labels.get(pairing.platform, pairing.platform) }} · token ends {{ pairing.display_token_suffix }}</p>
             </div>
             <span class="status-pill">Waiting</span>
           </div>

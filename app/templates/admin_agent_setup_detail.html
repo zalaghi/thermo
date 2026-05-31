@@ -39,19 +39,80 @@
 
     <div class="setup-summary-grid">
       <div class="setup-summary">
-        <span>Central Thermo URL</span>
-        <strong>{{ effective_public_url }}</strong>
+        <span>Selected platform</span>
+        <strong>{{ platform_label }}</strong>
       </div>
       <div class="setup-summary">
-        <span>Target agent URL</span>
+        <span>Thermo URL used in installer command</span>
+        <strong>{{ effective_public_url }}</strong>
+        <a href="/admin/settings">Edit in Settings</a>
+      </div>
+      <div class="setup-summary">
+        <span>Target agent port</span>
+        <strong>{{ pairing.agent_port }}</strong>
+      </div>
+      <div class="setup-summary">
+        <span>Target agent URL preview</span>
         <strong>{{ target_agent_url_preview }}</strong>
       </div>
     </div>
 
+    <div class="setup-summary">
+      <span>Security restrictions</span>
+      {% if security_summary_items %}
+        <ul class="compact-list">
+          {% for item in security_summary_items %}
+            <li>{{ item }}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <strong>Permanent API keys are not shown. Regenerate the token if you need the full installer command again.</strong>
+      {% endif %}
+    </div>
+
     {% if install_commands %}
       {% set is_freebsd_platform = pairing.platform in ["freebsd", "truenas_core"] %}
+      {% set is_synology_platform = pairing.platform == "synology_dsm" %}
 
-      {% if is_freebsd_platform %}
+      {% if is_synology_platform %}
+        <div class="setup-command-panel" aria-live="polite">
+          <h3>Synology with Container Manager / Docker</h3>
+          <p class="field-note">Recommended when your Synology supports Container Manager or Docker. Thermo does not publish an official agent image yet, so this command builds a local image from the public source tarball. A truly simple one-line Docker install needs a published image or a Docker-aware installer.</p>
+          <pre><code id="synology-docker-command">{{ install_commands.synology_docker_build }}</code></pre>
+          <button type="button" data-copy-target="#synology-docker-command">Copy Docker build command</button>
+          <p class="field-note" data-copy-feedback hidden></p>
+        </div>
+
+        <div class="setup-command-panel" aria-live="polite">
+          <h3>Synology without Docker</h3>
+          <p class="field-note">Best-effort DSM path. Run this once through a DSM-supported method such as Task Scheduler user-defined script as root, or a terminal/SSH session if you choose to enable one. The installer creates `thermo-agent-run.sh` and `synology-task-scheduler-script.sh` under the Thermo install directory.</p>
+          <pre><code id="synology-install-command">{{ install_commands.synology_installer }}</code></pre>
+          <button type="button" data-copy-target="#synology-install-command">Copy Synology curl command</button>
+          <pre><code id="synology-wget-install-command">{{ install_commands.synology_wget_installer }}</code></pre>
+          <button type="button" data-copy-target="#synology-wget-install-command">Copy Synology wget command</button>
+          <p class="field-note" data-copy-feedback hidden></p>
+        </div>
+
+        <ol class="setup-steps compact-steps">
+          <li>Copy the Synology command or Docker build command.</li>
+          <li>Run it on the NAS using a DSM-supported method.</li>
+          <li>If DSM cannot keep the agent running automatically, paste the generated Task Scheduler snippet into Control Panel -> Task Scheduler -> Create -> Triggered Task -> User-defined script.</li>
+          <li>Test `/health` and `/temperature`; the installer registers only after a local temperature test works.</li>
+        </ol>
+
+        <details class="setup-command-more">
+          <summary>Linux and FreeBSD commands</summary>
+          <div class="setup-command-panel">
+            <pre><code id="linux-install-command">{{ install_commands.linux }}</code></pre>
+            <button type="button" data-copy-target="#linux-install-command">Copy Linux command</button>
+            <pre><code id="freebsd-fetch-command">{{ install_commands.freebsd_fetch }}</code></pre>
+            <button type="button" data-copy-target="#freebsd-fetch-command">Copy FreeBSD fetch command</button>
+            <pre><code id="freebsd-curl-command">{{ install_commands.freebsd_curl }}</code></pre>
+            <button type="button" data-copy-target="#freebsd-curl-command">Copy FreeBSD curl command</button>
+            <p class="field-note" data-copy-feedback hidden></p>
+          </div>
+        </details>
+      {% elif is_freebsd_platform %}
         <div class="setup-command-panel" aria-live="polite">
           <h3>FreeBSD / TrueNAS CORE</h3>
           <p class="field-note">Recommended: run this in a FreeBSD jail only if the jail can access the required temperature sensor. Otherwise run on the TrueNAS host with care.</p>

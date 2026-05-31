@@ -19,6 +19,7 @@ from .settings import get_settings
 
 DEFAULT_WARNING_THRESHOLD = 65.0
 DEFAULT_CRITICAL_THRESHOLD = 80.0
+DEFAULT_AGENT_RATE_LIMIT_PER_MINUTE = 120
 TOKEN_SUFFIX_LENGTH = 8
 SETUP_AGENT_REQUEST_TIMEOUT_SECONDS = 3.0
 
@@ -27,6 +28,11 @@ LINUX_TEMPERATURE_COMMAND_HINT = (
     "grep -oE '[+-]?[0-9]+(\\.[0-9]+)?°C' | head -n1 | tr -d '+°C'"
 )
 FREEBSD_TEMPERATURE_COMMAND_HINT = "sysctl -n dev.cpu.0.temperature | sed 's/C//'"
+SYNOLOGY_TEMPERATURE_COMMAND_HINT = (
+    "if [ -r /sys/class/thermal/thermal_zone0/temp ]; then "
+    "awk '{printf \"%.1f\\n\", $1 / 1000}' /sys/class/thermal/thermal_zone0/temp; fi"
+)
+SYNOLOGY_DEFAULT_INSTALL_DIR = "/volume1/@appdata/thermo-agent"
 
 PLATFORM_CHOICES = [
     ("proxmox", "Proxmox"),
@@ -34,9 +40,11 @@ PLATFORM_CHOICES = [
     ("generic_systemd_linux", "Generic systemd Linux"),
     ("freebsd", "FreeBSD"),
     ("truenas_core", "TrueNAS CORE"),
+    ("synology_dsm", "Synology DSM"),
     ("other_advanced", "Other / Advanced"),
 ]
 PLATFORM_VALUES = {value for value, _label in PLATFORM_CHOICES}
+PLATFORM_LABELS = dict(PLATFORM_CHOICES)
 
 
 @dataclass(frozen=True)
@@ -48,6 +56,10 @@ class PairingFormValues:
     agent_port: int
     warning_threshold: float
     critical_threshold: float
+    restrict_agent_to_thermo_ip: bool
+    allowed_client: str
+    protect_health: bool
+    rate_limit_per_minute: int
 
 
 @dataclass(frozen=True)
@@ -57,6 +69,9 @@ class PairingCreationResult:
     linux_command: str
     freebsd_fetch_command: str
     freebsd_curl_command: str
+    synology_installer_command: str
+    synology_wget_installer_command: str
+    synology_docker_build_command: str
     raw_token: str
 
 
@@ -68,14 +83,20 @@ class PairingStatus:
 
 def default_pairing_form_data(thermo_url: str) -> dict[str, object]:
     settings = get_settings()
+    effective_thermo_url = settings.public_url or thermo_url
+    thermo_ip = public_url_ip_host(effective_thermo_url)
     return {
         "server_name": "",
         "platform": "proxmox",
-        "thermo_url": settings.public_url or thermo_url,
+        "thermo_url": effective_thermo_url,
         "bind_host": "0.0.0.0",
         "agent_port": str(settings.agent_default_port),
         "warning_threshold": format_threshold(DEFAULT_WARNING_THRESHOLD),
         "critical_threshold": format_threshold(DEFAULT_CRITICAL_THRESHOLD),
+        "restrict_agent_to_thermo_ip": bool(thermo_ip),
+        "allowed_client": thermo_ip or "",
+        "protect_health": False,
+        "rate_limit_per_minute": str(DEFAULT_AGENT_RATE_LIMIT_PER_MINUTE),
     }
 
 
@@ -85,6 +106,9 @@ def validate_pairing_form(form_data: dict[str, object]) -> tuple[list[str], Opti
     platform = str(form_data.get("platform", "")).strip()
     thermo_url = str(form_data.get("thermo_url", "")).strip().rstrip("/")
     bind_host = str(form_data.get("bind_host", "")).strip()
+    restrict_agent_to_thermo_ip = form_bool(form_data.get("restrict_agent_to_thermo_ip"))
+    allowed_client = str(form_data.get("allowed_client", "")).strip()
+    protect_health = form_bool(form_data.get("protect_health"))
 
     if not thermo_url:
         errors.append("THERMO_PUBLIC_URL must be configured before generating installer commands.")
@@ -98,13 +122,25 @@ def validate_pairing_form(form_data: dict[str, object]) -> tuple[list[str], Opti
         errors.append("Bind host must be a LAN IP address or hostname without a URL scheme.")
 
     agent_port = parse_port(form_data.get("agent_port"), errors)
+    rate_limit_per_minute = parse_rate_limit(form_data.get("rate_limit_per_minute"), errors)
     warning_threshold = parse_threshold(form_data.get("warning_threshold"), "Warning threshold", errors)
     critical_threshold = parse_threshold(form_data.get("critical_threshold"), "Critical threshold", errors)
     if warning_threshold is not None and critical_threshold is not None:
         if warning_threshold >= critical_threshold:
             errors.append("Warning threshold must be lower than critical threshold.")
+    if restrict_agent_to_thermo_ip:
+        if not allowed_client:
+            errors.append("Allowed Thermo server IP is required when agent restriction is enabled.")
+        elif not is_valid_allowed_client(allowed_client):
+            errors.append("Allowed Thermo server IP must be an IP address or CIDR range.")
 
-    if errors or agent_port is None or warning_threshold is None or critical_threshold is None:
+    if (
+        errors
+        or agent_port is None
+        or rate_limit_per_minute is None
+        or warning_threshold is None
+        or critical_threshold is None
+    ):
         return errors, None
 
     return errors, PairingFormValues(
@@ -115,6 +151,10 @@ def validate_pairing_form(form_data: dict[str, object]) -> tuple[list[str], Opti
         agent_port=agent_port,
         warning_threshold=warning_threshold,
         critical_threshold=critical_threshold,
+        restrict_agent_to_thermo_ip=restrict_agent_to_thermo_ip,
+        allowed_client=allowed_client,
+        protect_health=protect_health,
+        rate_limit_per_minute=rate_limit_per_minute,
     )
 
 
@@ -137,13 +177,28 @@ def create_pairing(session: Session, values: PairingFormValues) -> PairingCreati
     linux_command, freebsd_fetch_command, freebsd_curl_command = build_install_commands(
         thermo_url=values.thermo_url,
         raw_token=raw_token,
+        values=values,
     )
+    synology_installer_command = build_synology_installer_command(
+        thermo_url=values.thermo_url,
+        raw_token=raw_token,
+        values=values,
+    )
+    synology_wget_installer_command = build_synology_wget_installer_command(
+        thermo_url=values.thermo_url,
+        raw_token=raw_token,
+        values=values,
+    )
+    synology_docker_build_command = build_synology_docker_build_command()
     return PairingCreationResult(
         pairing=pairing,
         command=linux_command,
         linux_command=linux_command,
         freebsd_fetch_command=freebsd_fetch_command,
         freebsd_curl_command=freebsd_curl_command,
+        synology_installer_command=synology_installer_command,
+        synology_wget_installer_command=synology_wget_installer_command,
+        synology_docker_build_command=synology_docker_build_command,
         raw_token=raw_token,
     )
 
@@ -152,21 +207,87 @@ def build_install_command(values: PairingFormValues, raw_token: str) -> str:
     linux_command, _freebsd_fetch_command, _freebsd_curl_command = build_install_commands(
         thermo_url=values.thermo_url,
         raw_token=raw_token,
+        values=values,
     )
     return linux_command
 
 
-def build_install_commands(thermo_url: str, raw_token: str) -> tuple[str, str, str]:
+def build_install_commands(
+    thermo_url: str,
+    raw_token: str,
+    values: Optional[PairingFormValues] = None,
+) -> tuple[str, str, str]:
     settings = get_settings()
     script_url = shell_double_quote(settings.agent_install_script_url)
     quoted_thermo_url = shell_double_quote(thermo_url)
     quoted_token = shell_double_quote(raw_token)
-    args = f'--thermo-url {quoted_thermo_url} --token {quoted_token}'
+    args = [f"--thermo-url {quoted_thermo_url}", f"--token {quoted_token}"]
+    args.extend(installer_security_args(values))
+    joined_args = " ".join(args)
     return (
-        f"curl -fsSL {script_url} | sudo sh -s -- {args}",
-        f"fetch -o - {script_url} | sh -s -- {args}",
-        f"curl -fsSL {script_url} | sh -s -- {args}",
+        f"curl -fsSL {script_url} | sudo sh -s -- {joined_args}",
+        f"fetch -o - {script_url} | sh -s -- {joined_args}",
+        f"curl -fsSL {script_url} | sh -s -- {joined_args}",
     )
+
+
+def build_synology_installer_command(
+    thermo_url: str,
+    raw_token: str,
+    values: Optional[PairingFormValues] = None,
+) -> str:
+    settings = get_settings()
+    script_url = shell_double_quote(settings.agent_install_script_url)
+    joined_args = synology_installer_args(thermo_url=thermo_url, raw_token=raw_token, values=values)
+    return f"curl -fsSL {script_url} | sh -s -- {joined_args}"
+
+
+def build_synology_wget_installer_command(
+    thermo_url: str,
+    raw_token: str,
+    values: Optional[PairingFormValues] = None,
+) -> str:
+    settings = get_settings()
+    script_url = shell_double_quote(settings.agent_install_script_url)
+    joined_args = synology_installer_args(thermo_url=thermo_url, raw_token=raw_token, values=values)
+    return f"wget -q -O - {script_url} | sh -s -- {joined_args}"
+
+
+def synology_installer_args(
+    thermo_url: str,
+    raw_token: str,
+    values: Optional[PairingFormValues] = None,
+) -> str:
+    args = [
+        f"--thermo-url {shell_double_quote(thermo_url)}",
+        f"--token {shell_double_quote(raw_token)}",
+        f"--install-dir {shell_double_quote(SYNOLOGY_DEFAULT_INSTALL_DIR)}",
+    ]
+    args.extend(installer_security_args(values))
+    return " ".join(args)
+
+
+def build_synology_docker_build_command() -> str:
+    settings = get_settings()
+    tarball_url = shell_double_quote(settings.agent_source_tarball_url)
+    return (
+        "mkdir -p /volume1/docker/thermo-agent-build && "
+        "cd /volume1/docker/thermo-agent-build && "
+        f"curl -fsSL {tarball_url} -o thermo.tar.gz && "
+        "tar -xzf thermo.tar.gz --strip-components=1 && "
+        "docker build -f agent/Dockerfile -t thermo-agent:local ."
+    )
+
+
+def installer_security_args(values: Optional[PairingFormValues]) -> list[str]:
+    args: list[str] = []
+    if values and values.restrict_agent_to_thermo_ip and values.allowed_client:
+        args.append(f"--allow-client {shell_double_quote(values.allowed_client)}")
+    if values and values.protect_health:
+        args.append("--protect-health")
+    if values and values.rate_limit_per_minute != DEFAULT_AGENT_RATE_LIMIT_PER_MINUTE:
+        args.append(f'--rate-limit {shell_double_quote(str(values.rate_limit_per_minute))}')
+    return args
 
 
 def shell_double_quote(value: str) -> str:
@@ -260,7 +381,7 @@ def bootstrap_pairing(session: Session, raw_token: str, central_url: str) -> dic
         "bind_host": pairing.bind_host,
         "warning_threshold": pairing.warning_threshold,
         "critical_threshold": pairing.critical_threshold,
-        "central_url": settings.public_url or central_url.rstrip("/"),
+        "central_url": central_url.rstrip("/") or settings.public_url or "",
         "agent_api_key": pairing.generated_agent_api_key_encrypted_or_temporary,
         "temperature_command_hint": temperature_command_hint(pairing.platform),
         "source_tarball_url": source_tarball_url,
@@ -371,9 +492,29 @@ def build_agent_temperature_url(bind_host: str, agent_port: int) -> str:
     return f"http://{bind_host}:{agent_port}/temperature"
 
 
+def platform_label(platform: str) -> str:
+    return PLATFORM_LABELS.get(platform, platform.replace("_", " ").title())
+
+
+def security_summary(values: PairingFormValues) -> list[str]:
+    summary = ["Permanent agent API key is generated by Thermo during setup."]
+    if values.restrict_agent_to_thermo_ip and values.allowed_client:
+        summary.append(f"Agent allowlist: {values.allowed_client}.")
+    else:
+        summary.append("Agent IP allowlist is not configured by this command.")
+    if values.protect_health:
+        summary.append("/health will require X-API-Key.")
+    else:
+        summary.append("/health remains public unless changed later.")
+    summary.append(f"/temperature rate limit: {values.rate_limit_per_minute} requests per minute per client.")
+    return summary
+
+
 def temperature_command_hint(platform: str) -> str:
     if platform in {"freebsd", "truenas_core"}:
         return FREEBSD_TEMPERATURE_COMMAND_HINT
+    if platform == "synology_dsm":
+        return SYNOLOGY_TEMPERATURE_COMMAND_HINT
     if platform in {"proxmox", "debian_ubuntu", "generic_systemd_linux"}:
         return LINUX_TEMPERATURE_COMMAND_HINT
     return "Configure THERMO_TEMP_COMMAND for this platform."
@@ -403,7 +544,7 @@ def validate_agent_temperature_url(value: str, require_port: bool) -> Optional[s
     except ValueError:
         return "Agent URL port is invalid."
     if require_port and parsed_port is None:
-        return "Agent URL must include the agent port, for example http://192.168.4.2:8090/temperature."
+        return "Agent URL must include the agent port, for example http://AGENT-IP:8090/temperature."
     return None
 
 
@@ -413,6 +554,31 @@ def host_is_ip_address(host: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def public_url_ip_host(thermo_url: str) -> str:
+    parsed = urlparse(thermo_url)
+    host = parsed.hostname or ""
+    if host_is_ip_address(host):
+        return host
+    return ""
+
+
+def is_valid_allowed_client(value: str) -> bool:
+    try:
+        if "/" in value:
+            ipaddress.ip_network(value, strict=False)
+        else:
+            ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
+def form_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def verify_agent_from_central(agent_url: str, api_key: str) -> Optional[str]:
@@ -467,6 +633,18 @@ def parse_port(value: object, errors: list[str]) -> Optional[int]:
         errors.append("Agent port must be between 1 and 65535.")
         return None
     return port
+
+
+def parse_rate_limit(value: object, errors: list[str]) -> Optional[int]:
+    try:
+        rate_limit = int(str(value))
+    except (TypeError, ValueError):
+        errors.append("Rate limit per minute must be a number.")
+        return None
+    if rate_limit < 1 or rate_limit > 10000:
+        errors.append("Rate limit per minute must be between 1 and 10000.")
+        return None
+    return rate_limit
 
 
 def parse_threshold(value: object, label: str, errors: list[str]) -> Optional[float]:

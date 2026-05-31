@@ -54,6 +54,40 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertIn("verify_agent_env_temperature_command", self.script)
         self.assertNotIn("THERMO_TEMP_COMMAND=$temp_command_quoted", self.script)
 
+    def test_installer_writes_agent_security_environment(self) -> None:
+        self.assertIn("THERMO_AGENT_ALLOWED_CLIENTS=$ALLOW_CLIENTS", self.script)
+        self.assertIn("THERMO_AGENT_PROTECT_HEALTH=$(protect_health_value)", self.script)
+        self.assertIn("THERMO_AGENT_RATE_LIMIT_PER_MINUTE=$RATE_LIMIT_PER_MINUTE", self.script)
+        self.assertIn("chmod 600 \"$ENV_FILE\"", self.script)
+
+    def test_installer_accepts_security_flags_and_auto_allowlist(self) -> None:
+        self.assertIn("--allow-client)", self.script)
+        self.assertIn("--protect-health)", self.script)
+        self.assertIn("--rate-limit)", self.script)
+        self.assertIn("configure_agent_security_defaults", self.script)
+        self.assertIn("Restricting agent access to Thermo server IP", self.script)
+        self.assertIn("THERMO_AGENT_ALLOWED_CLIENTS will be empty", self.script)
+
+    def test_installer_prints_firewall_guidance_without_changing_firewall(self) -> None:
+        self.assertIn("print_firewall_guidance", self.script)
+        self.assertIn("firewall-cmd --permanent --add-rich-rule", self.script)
+        self.assertIn("ufw allow from", self.script)
+        self.assertIn("No firewall rules were changed by this installer.", self.script)
+
+    def test_installer_has_best_effort_synology_branch(self) -> None:
+        self.assertIn("--install-dir)", self.script)
+        self.assertIn("detect_synology", self.script)
+        self.assertIn('DISTRO_FAMILY="synology"', self.script)
+        self.assertIn("install_synology_dependencies", self.script)
+        self.assertIn("create_synology_run_scripts", self.script)
+        self.assertIn("synology-task-scheduler-script.sh", self.script)
+
+    def test_synology_branch_does_not_assume_systemd_or_package_manager(self) -> None:
+        self.assertIn("python3 was not found. Install Python 3 from Synology Package Center", self.script)
+        self.assertIn("This non-Docker path writes only under $INSTALL_DIR", self.script)
+        self.assertIn("DSM Task Scheduler", self.script)
+        self.assertIn("Could not find a readable temperature sensor on this Synology system.", self.script)
+
 
 if __name__ == "__main__":
     unittest.main()

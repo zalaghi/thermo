@@ -61,6 +61,19 @@ class LatestStatus(Base):
     server: Mapped[Server] = relationship(back_populates="latest_status")
 
 
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+        nullable=False,
+    )
+
+
 class AgentPairingToken(Base):
     __tablename__ = "agent_pairing_tokens"
 

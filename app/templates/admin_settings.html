@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="auth-panel server-form-panel" aria-labelledby="settings-title">
+    <div class="section-heading">
+      <p class="eyebrow">Admin</p>
+      <h2 id="settings-title">Settings</h2>
+      <p>Configure the public Thermo URL and lightweight branding.</p>
+    </div>
+
+    {% if success_message %}
+      <div class="form-success" role="status">
+        <p>{{ success_message }}</p>
+      </div>
+    {% endif %}
+
+    {% if warnings %}
+      <div class="form-warning" role="status">
+        {% for warning in warnings %}
+          <p>{{ warning }}</p>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {% if errors %}
+      <div class="form-error" role="alert">
+        {% for error in errors %}
+          <p>{{ error }}</p>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    <form class="form-stack" method="post" action="/admin/settings" enctype="multipart/form-data">
+      <input name="csrf_token" type="hidden" value="{{ csrf_token }}">
+
+      <section class="settings-section" aria-labelledby="settings-general">
+        <h3 id="settings-general">General</h3>
+
+        <label>
+          <span>App name</span>
+          <input name="app_name" type="text" value="{{ form_data.app_name }}" placeholder="Thermo">
+        </label>
+
+        <label>
+          <span>Public Thermo URL</span>
+          <input name="public_url" type="url" value="{{ form_data.public_url }}" placeholder="http://THERMO-IP:8088">
+          <span class="field-note">This URL is used in generated agent install commands. Example: http://THERMO-IP:8088</span>
+        </label>
+
+        <div class="settings-status-grid">
+          <div class="setup-summary">
+            <span>Effective public URL</span>
+            <strong>{{ app_config.public_url }}</strong>
+          </div>
+          <div class="setup-summary">
+            <span>Public URL status</span>
+            <strong>
+              {% if public_url_source == "database" %}
+                Configured in admin
+              {% elif public_url_source == "environment" %}
+                From environment
+              {% else %}
+                Request fallback
+              {% endif %}
+            </strong>
+          </div>
+          <div class="setup-summary">
+            <span>Detected from this request</span>
+            <strong>{{ detected_public_url }}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section" aria-labelledby="settings-branding">
+        <h3 id="settings-branding">Branding</h3>
+
+        <label>
+          <span>Favicon</span>
+          <input name="favicon" type="file" accept=".png,.jpg,.jpeg,.svg,.ico,.webp,image/png,image/jpeg,image/svg+xml,image/x-icon,image/webp">
+          {% if form_data.favicon_path %}
+            <span class="field-note">Current: {{ form_data.favicon_path }}</span>
+            <img class="settings-icon-preview" src="{{ form_data.favicon_path }}" alt="Current favicon preview">
+          {% else %}
+            <span class="field-note">No favicon uploaded.</span>
+          {% endif %}
+        </label>
+
+        <label>
+          <span>Mobile / PWA app icon</span>
+          <input name="app_icon" type="file" accept=".png,.jpg,.jpeg,.svg,.webp,image/png,image/jpeg,image/svg+xml,image/webp">
+          {% if form_data.app_icon_path %}
+            <span class="field-note">Current: {{ form_data.app_icon_path }}</span>
+            <img class="settings-icon-preview" src="{{ form_data.app_icon_path }}" alt="Current app icon preview">
+          {% else %}
+            <span class="field-note">No mobile app icon uploaded.</span>
+          {% endif %}
+        </label>
+
+        <label>
+          <span>Header icon / logo</span>
+          <input name="header_icon" type="file" accept=".png,.jpg,.jpeg,.svg,.webp,image/png,image/jpeg,image/svg+xml,image/webp">
+          {% if form_data.header_icon_path %}
+            <span class="field-note">Current: {{ form_data.header_icon_path }}</span>
+            <img class="settings-icon-preview" src="{{ form_data.header_icon_path }}" alt="Current header icon preview">
+          {% else %}
+            <span class="field-note">No header icon uploaded.</span>
+          {% endif %}
+        </label>
+
+        <label>
+          <span>Accent color</span>
+          <input name="accent_color" type="color" value="{{ form_data.accent_color or '#72d6a3' }}">
+        </label>
+      </section>
+
+      <section class="settings-section" aria-labelledby="settings-preview">
+        <h3 id="settings-preview">Preview</h3>
+        <div class="brand-preview">
+          {% if form_data.header_icon_path %}
+            <img class="brand-preview-icon" src="{{ form_data.header_icon_path }}" alt="">
+          {% elif form_data.app_icon_path %}
+            <img class="brand-preview-icon" src="{{ form_data.app_icon_path }}" alt="">
+          {% else %}
+            <span class="brand-preview-mark" aria-hidden="true"></span>
+          {% endif %}
+          <div>
+            <strong>{{ form_data.app_name or "Thermo" }}</strong>
+            <p>Accent and icons are shown in the dashboard header after saving.</p>
+          </div>
+        </div>
+      </section>
+
+      <div class="action-row">
+        <button type="submit">Save settings</button>
+        <a class="button-link" href="/admin">Cancel</a>
+      </div>
+    </form>
+  </section>
+{% endblock %}

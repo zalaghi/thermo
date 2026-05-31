@@ -3,15 +3,46 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{ settings.app_name }}</title>
+    <meta name="theme-color" content="{{ app_config.accent_color }}">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="{{ app_config.app_name }}">
+    <title>{{ app_config.app_name }}</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    {% if app_config.favicon_path %}
+      <link rel="icon" href="{{ app_config.favicon_path }}">
+    {% endif %}
+    {% if app_config.app_icon_path %}
+      <link rel="apple-touch-icon" href="{{ app_config.app_icon_path }}">
+    {% endif %}
     <link rel="stylesheet" href="{{ url_for('static', path='/css/app.css') }}">
+    <style>
+      :root {
+        --accent: {{ app_config.accent_color }};
+        --accent-soft: {{ app_config.accent_soft_color }};
+      }
+    </style>
   </head>
   <body>
     <main class="app-shell">
       <header class="topbar">
-        <h1><a href="/">{{ settings.app_name }}</a></h1>
+        <h1>
+          <a class="brand-link" href="/">
+            {% if app_config.header_icon_path %}
+              <img class="header-icon" src="{{ app_config.header_icon_path }}" alt="" width="28" height="28">
+            {% endif %}
+            <span>{{ app_config.app_name }}</span>
+          </a>
+        </h1>
         <nav class="topnav" aria-label="Primary navigation">
-          <a href="/admin">Admin</a>
+          {% if request.session.get("user_id") %}
+            <a href="/">Dashboard</a>
+            <a href="/admin/servers">Servers</a>
+            <a href="/admin/setup-agent">Setup Agent</a>
+            <a href="/admin/settings">Settings</a>
+            <a href="/admin/logout">Logout</a>
+          {% else %}
+            <a href="/admin">Admin</a>
+          {% endif %}
         </nav>
       </header>
 

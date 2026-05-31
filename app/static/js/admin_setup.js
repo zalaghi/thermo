@@ -1,4 +1,22 @@
 (function () {
+  const platformSelect = document.querySelector('select[name="platform"]');
+  const platformNotes = document.querySelectorAll("[data-platform-note]");
+
+  function updatePlatformNotes() {
+    if (!platformSelect) {
+      return;
+    }
+
+    platformNotes.forEach((note) => {
+      note.hidden = note.getAttribute("data-platform-note") !== platformSelect.value;
+    });
+  }
+
+  if (platformSelect) {
+    platformSelect.addEventListener("change", updatePlatformNotes);
+    updatePlatformNotes();
+  }
+
   document.querySelectorAll("[data-copy-target]").forEach((button) => {
     const target = document.querySelector(button.getAttribute("data-copy-target"));
     const feedback = button.parentElement.querySelector("[data-copy-feedback]");

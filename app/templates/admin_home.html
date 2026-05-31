@@ -6,16 +6,51 @@
       <p class="eyebrow">Admin</p>
       <h2 id="admin-title">Admin home</h2>
     </div>
-    <p>Signed in as {{ username }}.</p>
+    <p>Signed in as {{ username }}. Use the wizard for new servers; manual setup is for unusual agents only.</p>
   </section>
 
-  <section class="admin-placeholder" aria-label="Server management placeholder">
-    <h3>Server management</h3>
-    <p>Add agents with the setup wizard or manage saved servers manually.</p>
-    <div class="action-row">
-      <a class="button-link" href="/admin/setup-agent">Add Server Wizard</a>
-      <a class="button-link" href="/admin/servers">Manage servers</a>
-      <a class="button-link" href="/admin/logout">Sign out</a>
+  <section class="admin-card-grid" aria-label="Admin actions">
+    <article class="admin-card">
+      <span class="admin-card-label">Servers</span>
+      <h3>Manage saved agents</h3>
+      <p>Edit thresholds, masked API keys, enabled state, or remove old entries.</p>
+      <a class="button-link" href="/admin/servers">Open servers</a>
+    </article>
+
+    <article class="admin-card admin-card-primary">
+      <span class="admin-card-label">Install Agent</span>
+      <h3>Recommended setup path</h3>
+      <p>Generate a short-lived pairing command and let the agent register itself.</p>
+      <a class="button-link" href="/admin/setup-agent">Open setup wizard</a>
+    </article>
+
+    <article class="admin-card">
+      <span class="admin-card-label">Settings</span>
+      <h3>Public URL and branding</h3>
+      <p>Set the URL used in install commands and adjust lightweight icons.</p>
+      <a class="button-link" href="/admin/settings">Open settings</a>
+    </article>
+
+    <article class="admin-card">
+      <span class="admin-card-label">Security Notes</span>
+      <h3>Agent exposure checklist</h3>
+      <p>Review the safe defaults and firewall recommendations for agent ports.</p>
+      <a class="button-link" href="#security-notes">Read notes</a>
+    </article>
+  </section>
+
+  <section class="security-notes" id="security-notes" aria-labelledby="security-notes-title">
+    <div class="section-heading">
+      <p class="eyebrow">Security Notes</p>
+      <h2 id="security-notes-title">Keep agents private</h2>
     </div>
+    <ul>
+      <li>Agents are read-only and expose only health and temperature endpoints.</li>
+      <li><code>/temperature</code> requires the agent API key.</li>
+      <li>Use the optional IP allowlist whenever the Thermo server has a stable IP.</li>
+      <li>Firewall agent port <code>8090</code> so only Thermo can reach it.</li>
+      <li><code>/health</code> may be public unless protected during setup.</li>
+      <li>Do not expose agent ports to the public internet.</li>
+    </ul>
   </section>
 {% endblock %}

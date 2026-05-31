@@ -8,8 +8,8 @@
     </div>
     <p>Temperature agents configured for the dashboard.</p>
     <div class="action-row">
-      <a class="button-link" href="/admin/setup-agent">Add Server Wizard</a>
-      <a class="button-link" href="/admin/servers/new">Add server</a>
+      <a class="button-link" href="/admin/setup-agent">Install Agent</a>
+      <a class="button-link" href="/admin/servers/new">Advanced Manual Setup</a>
       <a class="button-link" href="/admin">Admin home</a>
     </div>
   </section>
@@ -53,7 +53,8 @@
     {% else %}
       <article class="server-card">
         <h3>No servers configured</h3>
-        <p>Add your first temperature agent when ready.</p>
+        <p>Use the Agent Setup Wizard to add your first temperature agent.</p>
+        <a class="button-link" href="/admin/setup-agent">Open setup wizard</a>
       </article>
     {% endif %}
   </section>

@@ -1,11 +1,14 @@
 import hmac
+import ipaddress
 import os
 import re
 import subprocess
+import time
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException, status
+from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 
@@ -14,20 +17,28 @@ DEFAULT_TEMP_COMMAND = (
     r"grep -oE '[+-]?[0-9]+(\.[0-9]+)?°C' | head -n1 | tr -d '+°C'"
 )
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 3.0
+DEFAULT_RATE_LIMIT_PER_MINUTE = 120
 TEMPERATURE_PATTERN = re.compile(r"[+-]?\d+(?:\.\d+)?")
+RATE_LIMIT_WINDOW_SECONDS = 60.0
+rate_limit_events: dict[str, deque[float]] = defaultdict(deque)
 
 
 app = FastAPI(title="Thermo Agent")
 
 
 @app.get("/health")
-async def health() -> dict[str, bool]:
+async def health(x_api_key: Optional[str] = Header(default=None)) -> dict[str, bool]:
+    if should_protect_health():
+        require_api_key(x_api_key)
     return {"ok": True}
 
 
 @app.get("/temperature")
-async def temperature(x_api_key: Optional[str] = Header(default=None)) -> dict[str, object]:
+async def temperature(request: Request, x_api_key: Optional[str] = Header(default=None)) -> dict[str, object]:
     require_api_key(x_api_key)
+    client_ip = get_client_ip(request)
+    require_allowed_client(client_ip)
+    enforce_rate_limit(client_ip)
     try:
         value = read_temperature()
     except TemperatureCommandError as exc:
@@ -52,6 +63,89 @@ def raise_unauthorized() -> None:
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Unauthorized",
     )
+
+
+def raise_forbidden() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Forbidden",
+    )
+
+
+def raise_rate_limited() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail="Rate limit exceeded",
+    )
+
+
+def get_client_ip(request: Request) -> str:
+    if request.client is None:
+        return ""
+    return request.client.host
+
+
+def require_allowed_client(client_ip: str) -> None:
+    allowed_networks = get_allowed_client_networks()
+    if not allowed_networks:
+        return
+
+    try:
+        remote_address = ipaddress.ip_address(client_ip)
+    except ValueError:
+        raise_forbidden()
+
+    if not any(remote_address in network for network in allowed_networks):
+        raise_forbidden()
+
+
+def get_allowed_client_networks() -> list[object]:
+    raw_value = os.getenv("THERMO_AGENT_ALLOWED_CLIENTS", "")
+    if not raw_value.strip():
+        return []
+
+    networks = []
+    for item in raw_value.split(","):
+        candidate = item.strip()
+        if not candidate:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(candidate, strict=False))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Invalid agent allowed clients configuration.",
+            ) from exc
+    return networks
+
+
+def enforce_rate_limit(client_ip: str) -> None:
+    limit = get_rate_limit_per_minute()
+    if limit <= 0:
+        return
+
+    now = time.monotonic()
+    events = rate_limit_events[client_ip or "unknown"]
+    while events and now - events[0] >= RATE_LIMIT_WINDOW_SECONDS:
+        events.popleft()
+    if len(events) >= limit:
+        raise_rate_limited()
+    events.append(now)
+
+
+def get_rate_limit_per_minute() -> int:
+    raw_value = os.getenv("THERMO_AGENT_RATE_LIMIT_PER_MINUTE", str(DEFAULT_RATE_LIMIT_PER_MINUTE))
+    try:
+        limit = int(raw_value)
+    except ValueError:
+        return DEFAULT_RATE_LIMIT_PER_MINUTE
+    if limit < 0:
+        return DEFAULT_RATE_LIMIT_PER_MINUTE
+    return limit
+
+
+def should_protect_health() -> bool:
+    return os.getenv("THERMO_AGENT_PROTECT_HEALTH", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def read_temperature() -> float:

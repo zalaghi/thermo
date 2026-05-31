@@ -4,7 +4,7 @@
   <section class="auth-panel server-form-panel" aria-labelledby="server-form-title">
     <div class="section-heading">
       <p class="eyebrow">Admin</p>
-      <h2 id="server-form-title">{{ "Advanced manual server" if mode == "new" else "Edit server" }}</h2>
+      <h2 id="server-form-title">{{ "Advanced Manual Setup" if mode == "new" else "Edit server" }}</h2>
       <p>Use this for unusual systems or existing agents. The Agent Setup Wizard is recommended for new servers.</p>
     </div>
 
@@ -37,7 +37,7 @@
 
       <label>
         <span>URL</span>
-        <input id="server-url" name="url" type="url" inputmode="url" value="{{ form_data.url }}" placeholder="http://192.168.4.10:8090/temperature" required>
+        <input id="server-url" name="url" type="url" inputmode="url" value="{{ form_data.url }}" placeholder="http://AGENT-IP:8090/temperature" required>
         <span class="field-note">Agent URL must point to the `/temperature` endpoint, usually `http://AGENT-IP:8090/temperature`.</span>
       </label>
 
@@ -49,7 +49,7 @@
       <label>
         <span>API key</span>
         <input id="server-api-key" name="api_key" type="password" autocomplete="off" {% if mode == "new" %}required{% endif %}>
-        <span class="field-note">{{ "Required for manual setup." if mode == "new" else "Leave blank to keep the saved key." }}</span>
+        <span class="field-note">{{ "Required for manual setup. Use Generate API key if this agent was configured by hand." if mode == "new" else "Leave blank to keep the saved key." }}</span>
       </label>
 
       {% if mode == "edit" %}
@@ -60,7 +60,7 @@
         <button type="button" data-generate-api-key>Generate API key</button>
         <button type="button" data-test-agent>Test connection</button>
       </div>
-      <p class="field-note test-result" data-test-result hidden></p>
+      <p class="field-note test-result" data-test-result aria-live="polite" hidden></p>
 
       <div class="form-grid">
         <label>

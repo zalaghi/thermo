@@ -16,6 +16,9 @@ FREEBSD_REGISTRATION_FILE="/usr/local/etc/thermo-agent-registration.env"
 FREEBSD_SERVICE_FILE="/usr/local/etc/rc.d/thermo_agent"
 FREEBSD_SERVICE_NAME="thermo_agent"
 
+SYNOLOGY_INSTALL_DIR="/volume1/@appdata/thermo-agent"
+SYNOLOGY_SERVICE_NAME="thermo-agent"
+
 DEFAULT_PORT="8090"
 DEFAULT_BIND_HOST="0.0.0.0"
 
@@ -23,10 +26,15 @@ THERMO_URL=""
 PAIRING_TOKEN=""
 OVERRIDE_BIND_HOST=""
 OVERRIDE_PORT=""
+OVERRIDE_INSTALL_DIR=""
 DRY_RUN=0
 UNINSTALL=0
 DEPS_INSTALLED=0
 DEBUG=0
+ALLOW_CLIENTS=""
+ALLOW_CLIENTS_PROVIDED=0
+PROTECT_HEALTH=0
+RATE_LIMIT_PER_MINUTE="120"
 
 TMP_DIR=""
 OS_KIND=""
@@ -36,6 +44,7 @@ DISTRO_NAME="Linux"
 DISTRO_FAMILY="generic"
 IS_PROXMOX=0
 IS_TRUENAS=0
+IS_SYNOLOGY=0
 
 INSTALL_DIR="$LINUX_INSTALL_DIR"
 ENV_FILE="$LINUX_ENV_FILE"
@@ -81,7 +90,7 @@ fail() {
 usage() {
   cat <<'EOF'
 Usage:
-  install-agent.sh --thermo-url URL --token TOKEN [--bind-host HOST] [--port PORT] [--debug] [--dry-run]
+  install-agent.sh --thermo-url URL --token TOKEN [--bind-host HOST] [--port PORT] [--install-dir PATH] [--allow-client IP_OR_CIDR] [--protect-health] [--rate-limit NUMBER] [--debug] [--dry-run]
   install-agent.sh --uninstall
 
 Examples:
@@ -125,6 +134,30 @@ while [ "$#" -gt 0 ]; do
       OVERRIDE_PORT="${2:-}"
       shift 2
       ;;
+    --install-dir)
+      OVERRIDE_INSTALL_DIR="${2:-}"
+      shift 2
+      ;;
+    --allow-client)
+      if [ -z "${2:-}" ]; then
+        fail "--allow-client requires an IP address or CIDR."
+      fi
+      if [ -z "$ALLOW_CLIENTS" ]; then
+        ALLOW_CLIENTS="$2"
+      else
+        ALLOW_CLIENTS="$ALLOW_CLIENTS,$2"
+      fi
+      ALLOW_CLIENTS_PROVIDED=1
+      shift 2
+      ;;
+    --protect-health)
+      PROTECT_HEALTH=1
+      shift
+      ;;
+    --rate-limit)
+      RATE_LIMIT_PER_MINUTE="${2:-}"
+      shift 2
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -166,6 +199,18 @@ set_freebsd_paths() {
   SERVICE_NAME="$FREEBSD_SERVICE_NAME"
 }
 
+set_synology_paths() {
+  if [ -n "$OVERRIDE_INSTALL_DIR" ]; then
+    INSTALL_DIR="$OVERRIDE_INSTALL_DIR"
+  else
+    INSTALL_DIR="$SYNOLOGY_INSTALL_DIR"
+  fi
+  ENV_FILE="$INSTALL_DIR/thermo-agent.env"
+  REGISTRATION_FILE="$INSTALL_DIR/thermo-agent-registration.env"
+  SERVICE_FILE="$INSTALL_DIR/synology-task-scheduler-script.sh"
+  SERVICE_NAME="$SYNOLOGY_SERVICE_NAME"
+}
+
 redacted_token() {
   if [ -z "$PAIRING_TOKEN" ]; then
     printf '%s' "<missing>"
@@ -194,6 +239,9 @@ require_root() {
     return
   fi
   if [ "$(id -u)" -ne 0 ]; then
+    if [ "$OS_KIND" = "synology" ]; then
+      fail "Run as root, for example through DSM Task Scheduler as root or a root terminal session."
+    fi
     fail "Run as root, for example: curl -fsSL ... | sudo sh -s -- --thermo-url URL --token TOKEN"
   fi
 }
@@ -217,6 +265,29 @@ validate_bind_host() {
   return 0
 }
 
+validate_install_dir() {
+  value="$1"
+  case "$value" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$value" in
+    *..*|*";"*|*"|"*|*"&"*|*">"*|*"<"*|*"("*|*")"*|*" "*|*\'*|*\"*|*\\*) return 1 ;;
+  esac
+  return 0
+}
+
+validate_rate_limit() {
+  value="$1"
+  case "$value" in
+    *[!0-9]*|"") return 1 ;;
+  esac
+  if [ "$value" -lt 1 ]; then
+    return 1
+  fi
+  return 0
+}
+
 shell_quote() {
   printf "%s" "$1" | sed "s/'/'\\\\''/g; 1s/^/'/; \$s/\$/'/"
 }
@@ -230,6 +301,96 @@ owner_group() {
     printf '%s' "root:wheel"
   else
     printf '%s' "root:root"
+  fi
+}
+
+thermo_url_host() {
+  THERMO_URL="$THERMO_URL" python3 - <<'PY'
+import os
+from urllib.parse import urlparse
+
+print(urlparse(os.environ["THERMO_URL"]).hostname or "")
+PY
+}
+
+is_ip_literal() {
+  value="$1"
+  VALUE="$value" python3 - <<'PY'
+import ipaddress
+import os
+import sys
+
+try:
+    ipaddress.ip_address(os.environ["VALUE"])
+except ValueError:
+    sys.exit(1)
+PY
+}
+
+normalize_allowed_clients() {
+  if [ -z "$ALLOW_CLIENTS" ]; then
+    return
+  fi
+
+  if ! normalized="$(
+    ALLOW_CLIENTS="$ALLOW_CLIENTS" python3 - <<'PY'
+import ipaddress
+import os
+import sys
+
+raw_value = os.environ["ALLOW_CLIENTS"]
+values = []
+for item in raw_value.split(","):
+    candidate = item.strip()
+    if not candidate:
+        continue
+    try:
+        if "/" in candidate:
+            values.append(str(ipaddress.ip_network(candidate, strict=False)))
+        else:
+            values.append(str(ipaddress.ip_address(candidate)))
+    except ValueError:
+        sys.stderr.write(f"Invalid --allow-client value: {candidate}\n")
+        sys.exit(1)
+
+if not values:
+    sys.stderr.write("--allow-client did not include a usable IP address or CIDR.\n")
+    sys.exit(1)
+
+print(",".join(values))
+PY
+  )"; then
+    fail "Allowed client entries must be IP addresses or CIDR ranges."
+  fi
+  ALLOW_CLIENTS="$normalized"
+}
+
+configure_agent_security_defaults() {
+  if [ "$ALLOW_CLIENTS_PROVIDED" -eq 0 ]; then
+    thermo_host="$(thermo_url_host)"
+    if [ -n "$thermo_host" ] && is_ip_literal "$thermo_host"; then
+      ALLOW_CLIENTS="$thermo_host"
+      log "Restricting agent access to Thermo server IP: $ALLOW_CLIENTS"
+    else
+      log "Warning: Thermo URL host is not an IP address; THERMO_AGENT_ALLOWED_CLIENTS will be empty."
+      log "Use --allow-client IP_OR_CIDR to restrict the agent to the central Thermo server."
+    fi
+  fi
+
+  normalize_allowed_clients
+}
+
+protect_health_value() {
+  if [ "$PROTECT_HEALTH" -eq 1 ]; then
+    printf '%s' "true"
+  else
+    printf '%s' "false"
+  fi
+}
+
+agent_health_header() {
+  if [ "$PROTECT_HEALTH" -eq 1 ]; then
+    printf 'X-API-Key: %s' "$AGENT_API_KEY"
   fi
 }
 
@@ -250,10 +411,10 @@ detect_os() {
       if [ "$DRY_RUN" -eq 1 ]; then
         OS_KIND="linux"
         set_linux_paths
-        DETECTED_PLATFORM="$os_name (dry run only; installer targets Linux/Proxmox and FreeBSD/TrueNAS)"
+        DETECTED_PLATFORM="$os_name (dry run only; installer targets Linux/Proxmox, FreeBSD/TrueNAS, and best-effort Synology DSM)"
         return
       fi
-      fail "Unsupported OS: $os_name. This installer supports Linux/Proxmox and FreeBSD/TrueNAS CORE."
+      fail "Unsupported OS: $os_name. This installer supports Linux/Proxmox, FreeBSD/TrueNAS CORE, and best-effort Synology DSM."
       ;;
   esac
 }
@@ -265,6 +426,14 @@ detect_linux() {
     DISTRO_ID="${ID:-unknown}"
     DISTRO_ID_LIKE="${ID_LIKE:-}"
     DISTRO_NAME="${PRETTY_NAME:-Linux}"
+  fi
+
+  if detect_synology; then
+    IS_SYNOLOGY=1
+    OS_KIND="synology"
+    DISTRO_FAMILY="synology"
+    set_synology_paths
+    return
   fi
 
   if command -v pveversion >/dev/null 2>&1; then
@@ -308,6 +477,29 @@ detect_linux() {
   esac
 
   DETECTED_PLATFORM="$DISTRO_NAME"
+}
+
+detect_synology() {
+  synology_version=""
+  if [ -f /etc.defaults/VERSION ]; then
+    synology_version="$(sed -n 's/^productversion="*\([^"]*\)"*/\1/p' /etc.defaults/VERSION | head -n 1)"
+  fi
+
+  if [ -f /etc.defaults/VERSION ] || [ -f /etc/VERSION ] || [ -f /etc.defaults/synoinfo.conf ] || [ -d /usr/syno ]; then
+    if [ -n "$synology_version" ]; then
+      DETECTED_PLATFORM="Synology DSM $synology_version"
+    else
+      DETECTED_PLATFORM="Synology DSM"
+    fi
+    return 0
+  fi
+
+  if uname -a 2>/dev/null | grep -iq synology; then
+    DETECTED_PLATFORM="Synology DSM"
+    return 0
+  fi
+
+  return 1
 }
 
 detect_freebsd() {
@@ -355,6 +547,17 @@ print_truenas_caution() {
   log "  If the jail cannot read host CPU temperature, use a host-level service carefully or set a different sensor command."
 }
 
+print_synology_caution() {
+  if [ "$IS_SYNOLOGY" -ne 1 ]; then
+    return
+  fi
+  log "Synology DSM note:"
+  log "  DSM support is best-effort and varies by model and DSM release."
+  log "  Recommended path is Container Manager/Docker when available."
+  log "  This non-Docker path writes only under $INSTALL_DIR and generates a Task Scheduler boot script."
+  log "  If no readable temperature sensor exists, setup will stop before registration."
+}
+
 dry_run_plan() {
   log "$INSTALLER_NAME dry run"
   log "Detected platform: $DETECTED_PLATFORM"
@@ -364,6 +567,16 @@ dry_run_plan() {
   log "Environment file: $ENV_FILE"
   log "Registration retry file: $REGISTRATION_FILE"
   log "Service file: $SERVICE_FILE"
+  if [ "$OS_KIND" = "synology" ]; then
+    log "Synology Task Scheduler snippet: $SERVICE_FILE"
+  fi
+  if [ "$ALLOW_CLIENTS_PROVIDED" -eq 1 ]; then
+    log "Allowed clients: $ALLOW_CLIENTS"
+  else
+    log "Allowed clients: auto when --thermo-url uses an IP address"
+  fi
+  log "Protect health endpoint: $(protect_health_value)"
+  log "Rate limit per minute: $RATE_LIMIT_PER_MINUTE"
   log "No files were changed."
 }
 
@@ -380,7 +593,14 @@ uninstall_agent() {
   fi
 
   log "Stopping Thermo agent service..."
-  if [ "$OS_KIND" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+  if [ "$OS_KIND" = "synology" ]; then
+    if [ -f "$INSTALL_DIR/thermo-agent.pid" ]; then
+      old_pid="$(cat "$INSTALL_DIR/thermo-agent.pid" 2>/dev/null || true)"
+      if [ -n "$old_pid" ] && kill -0 "$old_pid" >/dev/null 2>&1; then
+        kill "$old_pid" >/dev/null 2>&1 || true
+      fi
+    fi
+  elif [ "$OS_KIND" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
     systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
   elif [ "$OS_KIND" = "freebsd" ] && command -v service >/dev/null 2>&1; then
     service "$SERVICE_NAME" stop >/dev/null 2>&1 || true
@@ -403,7 +623,7 @@ uninstall_agent() {
 }
 
 have_http_client() {
-  command -v curl >/dev/null 2>&1 || command -v fetch >/dev/null 2>&1
+  command -v curl >/dev/null 2>&1 || command -v fetch >/dev/null 2>&1 || command -v wget >/dev/null 2>&1
 }
 
 ensure_python_for_bootstrap() {
@@ -452,14 +672,26 @@ install_dependencies() {
     freebsd)
       install_freebsd_dependencies
       ;;
+    synology)
+      install_synology_dependencies
+      ;;
     *)
-      fail "Unsupported Linux distribution. Install python3, python3-venv, curl or fetch, ca-certificates, tar, and lm-sensors manually, then rerun."
+      fail "Unsupported Linux distribution. Install python3, python3-venv, curl/fetch/wget, ca-certificates, tar, and lm-sensors manually, then rerun."
       ;;
   esac
 
   command -v python3 >/dev/null 2>&1 || fail "python3 is required but was not found after dependency installation."
-  have_http_client || fail "curl or fetch is required but was not found after dependency installation."
+  have_http_client || fail "curl, fetch, or wget is required but was not found after dependency installation."
   DEPS_INSTALLED=1
+}
+
+install_synology_dependencies() {
+  log "Checking Synology DSM dependencies..."
+  command -v python3 >/dev/null 2>&1 || fail "python3 was not found. Install Python 3 from Synology Package Center or run the Docker/Container Manager path."
+  have_http_client || fail "curl or wget was not found. Install curl from Synology Package Center, use a DSM-provided wget, or run the Docker/Container Manager path."
+  command -v tar >/dev/null 2>&1 || fail "tar was not found. DSM must provide tar to extract the Thermo source tarball."
+  log "Synology DSM note: this installer will not modify DSM system files or firewall rules."
+  log "If persistence is blocked by your DSM version, use the generated Task Scheduler script."
 }
 
 install_freebsd_dependencies() {
@@ -503,7 +735,11 @@ http_get() {
     fetch -q -o - "$url"
     return
   fi
-  fail "curl or fetch is required."
+  if command -v wget >/dev/null 2>&1; then
+    wget -q -O - "$url"
+    return
+  fi
+  fail "curl, fetch, or wget is required."
 }
 
 download_file() {
@@ -517,7 +753,11 @@ download_file() {
     fetch -q -o "$output" "$url"
     return
   fi
-  fail "curl or fetch is required."
+  if command -v wget >/dev/null 2>&1; then
+    wget -q -O "$output" "$url"
+    return
+  fi
+  fail "curl, fetch, or wget is required."
 }
 
 fetch_bootstrap() {
@@ -627,6 +867,8 @@ command_temperature_value() {
 detect_temperature_command() {
   if [ "$OS_KIND" = "freebsd" ]; then
     choose_freebsd_temperature_command
+  elif [ "$OS_KIND" = "synology" ]; then
+    choose_synology_temperature_command
   else
     choose_linux_temperature_command
   fi
@@ -684,6 +926,22 @@ choose_freebsd_temperature_command() {
   fi
 
   fail "FreeBSD CPU temperature sysctl dev.cpu.0.temperature is unavailable. Run: sysctl -a | grep -i temperature. If this is a jail, it may not be able to read host CPU temperature; use a host-level service carefully or set a different sensor command."
+}
+
+choose_synology_temperature_command() {
+  thermal_zone0='if [ -r /sys/class/thermal/thermal_zone0/temp ]; then awk '"'"'{printf "%.1f\n", $1 / 1000}'"'"' /sys/class/thermal/thermal_zone0/temp; fi'
+  thermal_any='for zone in /sys/class/thermal/thermal_zone*/temp; do [ -r "$zone" ] || continue; awk '"'"'{printf "%.1f\n", $1 / 1000}'"'"' "$zone"; break; done'
+  sensors_generic="sensors 2>/dev/null | grep -oE '[+-]?[0-9]+(\\.[0-9]+)?°C' | head -n1 | tr -d '+°C'"
+
+  try_temperature_candidate "Synology thermal_zone0" "$thermal_zone0" && return
+  try_temperature_candidate "Synology first readable thermal zone" "$thermal_any" && return
+  try_temperature_candidate "Synology sensors output" "$sensors_generic" && return
+  try_temperature_candidate "Bootstrap temperature hint" "$TEMPERATURE_COMMAND_HINT" && return
+
+  log "Could not find a readable temperature sensor on this Synology system."
+  log "Check available sensors with: ls -l /sys/class/thermal && cat /sys/class/thermal/thermal_zone*/temp"
+  log "If your model exposes another command, edit $INSTALL_DIR/read-temperature.sh after installation and rerun setup with a new token."
+  fail "Could not find a readable temperature sensor on this Synology system."
 }
 
 print_sensors_output() {
@@ -744,14 +1002,14 @@ create_python_env() {
     return
   fi
 
-  if [ "$OS_KIND" != "freebsd" ]; then
+  if [ "$OS_KIND" != "freebsd" ] && [ "$OS_KIND" != "synology" ]; then
     fail "python3 venv failed. Install python3-venv or equivalent and rerun."
   fi
 
   log "python3 venv is unavailable; installing Python dependencies into $INSTALL_DIR/python."
   log "This is less isolated than a venv, but stays contained under the Thermo agent directory."
   if ! python3 -m pip --version >/dev/null 2>&1; then
-    fail "FreeBSD venv and pip are unavailable. Install Python venv support or py3*-pip, then rerun."
+    fail "Python venv and pip are unavailable. Install Python venv support or pip, then rerun."
   fi
   PYTHONPATH_DIR="$INSTALL_DIR/python"
   rm -rf "$PYTHONPATH_DIR"
@@ -845,6 +1103,9 @@ write_env_file() {
 THERMO_AGENT_API_KEY=$AGENT_API_KEY
 THERMO_TEMP_COMMAND=$temp_command_path
 THERMO_TEMP_TIMEOUT_SECONDS=3
+THERMO_AGENT_ALLOWED_CLIENTS=$ALLOW_CLIENTS
+THERMO_AGENT_PROTECT_HEALTH=$(protect_health_value)
+THERMO_AGENT_RATE_LIMIT_PER_MINUTE=$RATE_LIMIT_PER_MINUTE
 EOF
   chown "$(owner_group)" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
@@ -904,8 +1165,28 @@ test_url() {
     fi
     return
   fi
-  printf '%s\n' "ERROR: curl or fetch is required." >&2
+  if command -v wget >/dev/null 2>&1; then
+    if [ -n "\$header" ]; then
+      wget -q -O - --header "\$header" "\$url"
+    else
+      wget -q -O - "\$url"
+    fi
+    return
+  fi
+  printf '%s\n' "ERROR: curl, fetch, or wget is required." >&2
   exit 1
+}
+
+health_header() {
+  case "\${THERMO_AGENT_PROTECT_HEALTH:-false}" in
+    1|true|TRUE|yes|YES|on|ON)
+      printf 'X-API-Key: %s' "\$THERMO_AGENT_API_KEY"
+      ;;
+  esac
+}
+
+temperature_from_command() {
+  sh -c "\$THERMO_TEMP_COMMAND" 2>/dev/null | awk '/^-?[0-9]+([.][0-9]+)?$/ {print; exit}'
 }
 
 detect_ip() {
@@ -921,6 +1202,9 @@ detect_ip() {
     if [ -z "\$detected_ip" ]; then
       detected_ip="\$(hostname -I 2>/dev/null | awk '{print \$1}')"
     fi
+    if [ -z "\$detected_ip" ] && command -v ifconfig >/dev/null 2>&1; then
+      detected_ip="\$(ifconfig 2>/dev/null | awk '/inet / && \$2 != "127.0.0.1" {print \$2; exit}')"
+    fi
   fi
   if [ -z "\$detected_ip" ]; then
     if [ "\$THERMO_AGENT_BIND_HOST" != "0.0.0.0" ]; then
@@ -935,19 +1219,19 @@ detect_ip() {
 printf '%s\n' "Testing local Thermo agent..."
 health_url="http://127.0.0.1:\$THERMO_AGENT_PORT/health"
 temp_url="http://127.0.0.1:\$THERMO_AGENT_PORT/temperature"
-if ! test_url "\$health_url" "" >/dev/null 2>&1; then
+if ! test_url "\$health_url" "\$(health_header)" >/dev/null 2>&1; then
   if [ "\$THERMO_AGENT_BIND_HOST" != "0.0.0.0" ] && [ "\$THERMO_AGENT_BIND_HOST" != "127.0.0.1" ]; then
     health_url="http://\$THERMO_AGENT_BIND_HOST:\$THERMO_AGENT_PORT/health"
     temp_url="http://\$THERMO_AGENT_BIND_HOST:\$THERMO_AGENT_PORT/temperature"
-    test_url "\$health_url" "" >/dev/null
+    test_url "\$health_url" "\$(health_header)" >/dev/null
   else
     printf '%s\n' "ERROR: Agent /health check failed." >&2
     exit 1
   fi
 fi
 
-temp_json="\$(test_url "\$temp_url" "X-API-Key: \$THERMO_AGENT_API_KEY")"
-test_temperature="\$(TEMP_JSON="\$temp_json" python3 - <<'PY'
+if temp_json="\$(test_url "\$temp_url" "X-API-Key: \$THERMO_AGENT_API_KEY" 2>/dev/null)"; then
+  test_temperature="\$(TEMP_JSON="\$temp_json" python3 - <<'PY'
 import json
 import math
 import os
@@ -959,6 +1243,16 @@ if not math.isfinite(temperature):
 print(temperature)
 PY
 )"
+else
+  if [ -n "\${THERMO_AGENT_ALLOWED_CLIENTS:-}" ]; then
+    printf '%s\n' "Local /temperature check was blocked by the agent allowlist; using the local temperature command for registration proof."
+    test_temperature="\$(temperature_from_command || true)"
+    [ -n "\$test_temperature" ] || { printf '%s\n' "ERROR: Local temperature command did not return a number." >&2; exit 1; }
+  else
+    printf '%s\n' "ERROR: Agent /temperature check failed." >&2
+    exit 1
+  fi
+fi
 
 detected_hostname="\$(hostname 2>/dev/null || printf '%s' unknown)"
 detected_ip="\$(detect_ip)"
@@ -1010,7 +1304,11 @@ print_registration_failure_help() {
   log "The agent was left installed so you can inspect and retry before the pairing token expires."
   print_redacted_env_summary
   print_service_logs
-  if [ "$OS_KIND" = "freebsd" ]; then
+  if [ "$OS_KIND" = "synology" ]; then
+    log "Agent log: $INSTALL_DIR/thermo-agent.log"
+    log "Manual start: $SERVICE_FILE"
+    log "Retry registration: $INSTALL_DIR/retry-registration.sh"
+  elif [ "$OS_KIND" = "freebsd" ]; then
     log "Service status: service $SERVICE_NAME status"
     log "Retry registration: $INSTALL_DIR/retry-registration.sh"
   else
@@ -1021,7 +1319,9 @@ print_registration_failure_help() {
 }
 
 create_service() {
-  if [ "$OS_KIND" = "freebsd" ]; then
+  if [ "$OS_KIND" = "synology" ]; then
+    create_synology_run_scripts
+  elif [ "$OS_KIND" = "freebsd" ]; then
     create_freebsd_service
   else
     create_systemd_service
@@ -1064,6 +1364,7 @@ create_freebsd_service() {
 set -eu
 . "$ENV_FILE"
 export THERMO_AGENT_API_KEY THERMO_TEMP_COMMAND THERMO_TEMP_TIMEOUT_SECONDS
+export THERMO_AGENT_ALLOWED_CLIENTS THERMO_AGENT_PROTECT_HEALTH THERMO_AGENT_RATE_LIMIT_PER_MINUTE
 cd "$INSTALL_DIR"
 if [ -d "$INSTALL_DIR/python" ]; then
   export PYTHONPATH="$INSTALL_DIR/python\${PYTHONPATH:+:\$PYTHONPATH}"
@@ -1098,8 +1399,47 @@ EOF
   chmod 755 "$SERVICE_FILE"
 }
 
+create_synology_run_scripts() {
+  log "Creating Synology run script..."
+  cat >"$INSTALL_DIR/thermo-agent-run.sh" <<EOF
+#!/bin/sh
+set -eu
+. "$ENV_FILE"
+export THERMO_AGENT_API_KEY THERMO_TEMP_COMMAND THERMO_TEMP_TIMEOUT_SECONDS
+export THERMO_AGENT_ALLOWED_CLIENTS THERMO_AGENT_PROTECT_HEALTH THERMO_AGENT_RATE_LIMIT_PER_MINUTE
+cd "$INSTALL_DIR"
+if [ -d "$INSTALL_DIR/python" ]; then
+  export PYTHONPATH="$INSTALL_DIR/python\${PYTHONPATH:+:\$PYTHONPATH}"
+  exec python3 -m uvicorn agent.main:app --host "$BIND_HOST" --port "$AGENT_PORT"
+fi
+exec "$INSTALL_DIR/.venv/bin/uvicorn" agent.main:app --host "$BIND_HOST" --port "$AGENT_PORT"
+EOF
+  chown "$(owner_group)" "$INSTALL_DIR/thermo-agent-run.sh"
+  chmod 700 "$INSTALL_DIR/thermo-agent-run.sh"
+
+  log "Creating DSM Task Scheduler script snippet..."
+  cat >"$SERVICE_FILE" <<EOF
+#!/bin/sh
+# Thermo agent DSM Task Scheduler user-defined script.
+# Configure this as a triggered task at boot, running as root.
+if [ -f "$INSTALL_DIR/thermo-agent.pid" ]; then
+  old_pid="\$(cat "$INSTALL_DIR/thermo-agent.pid" 2>/dev/null || true)"
+  if [ -n "\$old_pid" ] && kill -0 "\$old_pid" >/dev/null 2>&1; then
+    exit 0
+  fi
+fi
+nohup "$INSTALL_DIR/thermo-agent-run.sh" >> "$INSTALL_DIR/thermo-agent.log" 2>&1 &
+echo \$! > "$INSTALL_DIR/thermo-agent.pid"
+chmod 600 "$INSTALL_DIR/thermo-agent.pid"
+EOF
+  chown "$(owner_group)" "$SERVICE_FILE"
+  chmod 700 "$SERVICE_FILE"
+}
+
 start_service() {
-  if [ "$OS_KIND" = "freebsd" ]; then
+  if [ "$OS_KIND" = "synology" ]; then
+    start_synology_agent
+  elif [ "$OS_KIND" = "freebsd" ]; then
     start_freebsd_service
   else
     start_systemd_service
@@ -1135,6 +1475,22 @@ start_freebsd_service() {
   fi
 }
 
+start_synology_agent() {
+  log "Starting Thermo agent using DSM-compatible run script..."
+  if [ -f "$INSTALL_DIR/thermo-agent.pid" ]; then
+    old_pid="$(cat "$INSTALL_DIR/thermo-agent.pid" 2>/dev/null || true)"
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" >/dev/null 2>&1; then
+      kill "$old_pid" >/dev/null 2>&1 || true
+      sleep 1
+    fi
+  fi
+  nohup "$INSTALL_DIR/thermo-agent-run.sh" >> "$INSTALL_DIR/thermo-agent.log" 2>&1 &
+  echo $! >"$INSTALL_DIR/thermo-agent.pid"
+  chown "$(owner_group)" "$INSTALL_DIR/thermo-agent.pid"
+  chmod 600 "$INSTALL_DIR/thermo-agent.pid"
+  log "If DSM does not keep custom processes after reboot, paste $SERVICE_FILE into DSM Task Scheduler as a boot task."
+}
+
 test_url() {
   url="$1"
   header="$2"
@@ -1154,7 +1510,15 @@ test_url() {
     fi
     return
   fi
-  fail "curl or fetch is required."
+  if command -v wget >/dev/null 2>&1; then
+    if [ -n "$header" ]; then
+      wget -q -O - --header "$header" "$url"
+    else
+      wget -q -O - "$url"
+    fi
+    return
+  fi
+  fail "curl, fetch, or wget is required."
 }
 
 test_url_body() {
@@ -1196,8 +1560,28 @@ test_url_body() {
     HTTP_BODY="$body"
     return
   fi
+  if command -v wget >/dev/null 2>&1; then
+    if [ -n "$header" ]; then
+      if wget -q -O "$response_file" --header "$header" "$url"; then
+        status_code="200"
+      else
+        status_code="000"
+      fi
+    else
+      if wget -q -O "$response_file" "$url"; then
+        status_code="200"
+      else
+        status_code="000"
+      fi
+    fi
+    body="$(cat "$response_file" 2>/dev/null || true)"
+    rm -f "$response_file"
+    HTTP_STATUS="$status_code"
+    HTTP_BODY="$body"
+    return
+  fi
   rm -f "$response_file"
-  fail "curl or fetch is required."
+  fail "curl, fetch, or wget is required."
 }
 
 print_redacted_env_summary() {
@@ -1207,6 +1591,13 @@ print_redacted_env_summary() {
   log "  Bind host: $BIND_HOST"
   log "  Port: $AGENT_PORT"
   log "  Temperature command: ${TEMP_COMMAND_LABEL:-custom/unknown}"
+  if [ -n "$ALLOW_CLIENTS" ]; then
+    log "  Allowed clients: $ALLOW_CLIENTS"
+  else
+    log "  Allowed clients: <not restricted by agent allowlist>"
+  fi
+  log "  Protected health: $(protect_health_value)"
+  log "  Rate limit per minute: $RATE_LIMIT_PER_MINUTE"
   env_api_key="$(read_agent_api_key_from_env 2>/dev/null || true)"
   if [ -n "$env_api_key" ]; then
     log "  API key: $(redacted_secret "$env_api_key")"
@@ -1230,10 +1621,18 @@ print_redacted_runtime_config() {
 
 print_manual_debug_commands() {
   log "Manual debug commands:"
-  log "  KEY=\"\$(sudo sed -n 's/^THERMO_AGENT_API_KEY=//p' $ENV_FILE | head -n1 | sed \"s/^['\\\"']//;s/['\\\"']$//\")\""
+  if [ "$OS_KIND" = "synology" ]; then
+    log "  KEY=\"\$(sed -n 's/^THERMO_AGENT_API_KEY=//p' $ENV_FILE | head -n1 | sed \"s/^['\\\"']//;s/['\\\"']$//\")\""
+  else
+    log "  KEY=\"\$(sudo sed -n 's/^THERMO_AGENT_API_KEY=//p' $ENV_FILE | head -n1 | sed \"s/^['\\\"']//;s/['\\\"']$//\")\""
+  fi
   log "  curl -i http://127.0.0.1:$AGENT_PORT/health"
+  log "  curl -i -H \"X-API-Key: \$KEY\" http://127.0.0.1:$AGENT_PORT/health"
   log "  curl -i -H \"X-API-Key: \$KEY\" http://127.0.0.1:$AGENT_PORT/temperature"
-  if [ "$OS_KIND" = "linux" ]; then
+  if [ "$OS_KIND" = "synology" ]; then
+    log "  $SERVICE_FILE"
+    log "  tail -n 100 $INSTALL_DIR/thermo-agent.log"
+  elif [ "$OS_KIND" = "linux" ]; then
     log "  sudo systemctl status $SERVICE_NAME --no-pager"
     log "  sudo journalctl -u $SERVICE_NAME -n 100 --no-pager"
   else
@@ -1242,6 +1641,14 @@ print_manual_debug_commands() {
 }
 
 print_service_logs() {
+  if [ "$OS_KIND" = "synology" ]; then
+    if [ -f "$INSTALL_DIR/thermo-agent.log" ]; then
+      log "Recent Synology agent log:"
+      tail -n 80 "$INSTALL_DIR/thermo-agent.log" || true
+    fi
+    return
+  fi
+
   if [ "$OS_KIND" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
     log "systemctl status $SERVICE_NAME:"
     systemctl status "$SERVICE_NAME" --no-pager -l || true
@@ -1269,6 +1676,30 @@ print_agent_diagnostics() {
   print_service_logs
 }
 
+firewall_source_example() {
+  if [ -n "$ALLOW_CLIENTS" ]; then
+    first_source="$(printf '%s' "$ALLOW_CLIENTS" | awk -F, '{print $1}')"
+    printf '%s' "$first_source"
+  else
+    printf '%s' "THERMO_IP"
+  fi
+}
+
+print_firewall_guidance() {
+  source_example="$(firewall_source_example)"
+  log "Firewall recommendation:"
+  log "  The agent requires X-API-Key, but you should still restrict port $AGENT_PORT to the central Thermo server."
+  log "  Fedora/firewalld example:"
+  log "    sudo firewall-cmd --permanent --add-rich-rule='rule family=\"ipv4\" source address=\"$source_example\" port port=\"$AGENT_PORT\" protocol=\"tcp\" accept'"
+  log "    sudo firewall-cmd --reload"
+  log "  Debian/Ubuntu UFW example:"
+  log "    sudo ufw allow from $source_example to any port $AGENT_PORT proto tcp"
+  if [ "$OS_KIND" = "synology" ]; then
+    log "  Synology DSM: restrict port $AGENT_PORT to the Thermo server in DSM Firewall manually if enabled."
+  fi
+  log "  No firewall rules were changed by this installer."
+}
+
 test_agent() {
   log "Testing local agent endpoints..."
   if [ -z "$AGENT_API_KEY" ]; then
@@ -1283,11 +1714,11 @@ test_agent() {
   health_url="http://127.0.0.1:$AGENT_PORT/health"
   temp_url="http://127.0.0.1:$AGENT_PORT/temperature"
 
-  if ! test_url "$health_url" "" >/dev/null 2>&1; then
+  if ! test_url "$health_url" "$(agent_health_header)" >/dev/null 2>&1; then
     if [ "$BIND_HOST" != "0.0.0.0" ] && [ "$BIND_HOST" != "127.0.0.1" ]; then
       health_url="http://$BIND_HOST:$AGENT_PORT/health"
       temp_url="http://$BIND_HOST:$AGENT_PORT/temperature"
-      if ! test_url "$health_url" "" >/dev/null 2>&1; then
+      if ! test_url "$health_url" "$(agent_health_header)" >/dev/null 2>&1; then
         print_agent_diagnostics
         fail "Agent /health check failed."
       fi
@@ -1306,6 +1737,16 @@ test_agent() {
     log "$temp_json"
     print_agent_diagnostics
     fail "Agent /temperature check failed."
+  fi
+  if [ "$HTTP_STATUS" = "403" ] && [ -n "$ALLOW_CLIENTS" ]; then
+    log "Local /temperature check was blocked by the agent allowlist, which is expected when localhost is not allowed."
+    log "Thermo will verify the agent from the central server during registration."
+    TEST_TEMPERATURE="$(command_temperature_value "$(temperature_command_script_path)" || true)"
+    if [ -z "$TEST_TEMPERATURE" ]; then
+      print_agent_diagnostics
+      fail "Local temperature command did not return a numeric value."
+    fi
+    return
   fi
   case "$HTTP_STATUS" in
     2??)
@@ -1361,6 +1802,9 @@ detect_primary_ip() {
     if [ -z "$DETECTED_IP" ]; then
       DETECTED_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
     fi
+    if [ -z "$DETECTED_IP" ] && command -v ifconfig >/dev/null 2>&1; then
+      DETECTED_IP="$(ifconfig 2>/dev/null | awk '/inet / && $2 != "127.0.0.1" {print $2; exit}')"
+    fi
   fi
 
   if [ -z "$DETECTED_IP" ]; then
@@ -1414,6 +1858,10 @@ validate_install_args() {
   if [ -n "$OVERRIDE_BIND_HOST" ]; then
     validate_bind_host "$OVERRIDE_BIND_HOST" || fail "--bind-host must be a host or IP without spaces, slashes, or URL scheme."
   fi
+  if [ -n "$OVERRIDE_INSTALL_DIR" ]; then
+    validate_install_dir "$OVERRIDE_INSTALL_DIR" || fail "--install-dir must be an absolute path without spaces, traversal, quotes, or shell metacharacters."
+  fi
+  validate_rate_limit "$RATE_LIMIT_PER_MINUTE" || fail "--rate-limit must be a positive whole number."
 }
 
 main_install() {
@@ -1429,12 +1877,14 @@ main_install() {
   log "$INSTALLER_NAME"
   log "Detected platform: $DETECTED_PLATFORM"
   print_truenas_caution
+  print_synology_caution
   log "Install directory: $INSTALL_DIR"
 
   ensure_python_for_bootstrap
   install_dependencies
   fetch_bootstrap
   parse_bootstrap
+  configure_agent_security_defaults
   choose_temperature_command
   install_agent_files
   create_python_env
@@ -1453,12 +1903,16 @@ main_install() {
   remove_registration_retry_files
 
   log "Thermo agent installed successfully."
-  if [ "$OS_KIND" = "freebsd" ]; then
+  if [ "$OS_KIND" = "synology" ]; then
+    log "Manual start / boot script: $SERVICE_FILE"
+    log "Agent log: $INSTALL_DIR/thermo-agent.log"
+    log "DSM persistence: paste $SERVICE_FILE into Task Scheduler as a boot task if needed."
+  elif [ "$OS_KIND" = "freebsd" ]; then
     log "Service status: service $SERVICE_NAME status"
-    log "Firewall recommendation: allow agent port $AGENT_PORT only from the central Thermo server."
   else
     log "Service status: systemctl status $SERVICE_NAME"
   fi
+  print_firewall_guidance
   log "Thermo dashboard: ${CENTRAL_URL:-$THERMO_URL}"
 }
 
