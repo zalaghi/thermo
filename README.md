@@ -197,6 +197,12 @@ curl -i http://127.0.0.1:8090/health
 curl -i -H "X-API-Key: $KEY" http://127.0.0.1:8090/temperature
 ```
 
+- If this curl command still returns Unauthorized after reinstalling, restart the service so systemd reloads `/etc/thermo-agent.env`:
+
+```bash
+sudo systemctl restart thermo-agent.service
+```
+
 Central URL not reachable:
 
 - Set `THERMO_PUBLIC_URL` to the URL target servers can reach, for example `http://YOUR-THERMO-IP:8088`.

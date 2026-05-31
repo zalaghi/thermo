@@ -1061,9 +1061,15 @@ start_service() {
 }
 
 start_systemd_service() {
-  log "Enabling and starting $SERVICE_NAME..."
+  log "Enabling and restarting $SERVICE_NAME..."
   systemctl daemon-reload
-  systemctl enable --now "$SERVICE_NAME"
+  systemctl enable "$SERVICE_NAME"
+  if systemctl is-active --quiet "$SERVICE_NAME"; then
+    log "Restarting existing $SERVICE_NAME so it reloads $ENV_FILE..."
+    systemctl restart "$SERVICE_NAME"
+  else
+    systemctl start "$SERVICE_NAME"
+  fi
 }
 
 start_freebsd_service() {

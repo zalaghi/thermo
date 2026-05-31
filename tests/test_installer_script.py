@@ -35,6 +35,18 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertIn("Agent rejected the API key during local test.", self.script)
         self.assertIn("This means the service did not receive the same THERMO_AGENT_API_KEY", self.script)
 
+    def test_systemd_start_restarts_existing_service_to_reload_env_file(self) -> None:
+        start_service = self.script[
+            self.script.index("start_systemd_service() {"):
+            self.script.index("start_freebsd_service() {")
+        ]
+
+        self.assertIn('systemctl enable "$SERVICE_NAME"', start_service)
+        self.assertIn('systemctl is-active --quiet "$SERVICE_NAME"', start_service)
+        self.assertIn('systemctl restart "$SERVICE_NAME"', start_service)
+        self.assertIn('systemctl start "$SERVICE_NAME"', start_service)
+        self.assertNotIn('enable --now "$SERVICE_NAME"', start_service)
+
 
 if __name__ == "__main__":
     unittest.main()
