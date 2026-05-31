@@ -185,6 +185,18 @@ curl -H 'X-API-Key: value-from-agent-env-file' http://AGENT-IP:8090/temperature
 - Confirm the saved server URL ends with `/temperature`.
 - Confirm the agent service is running.
 
+Agent `/temperature` shows Unauthorized in a browser:
+
+- This is expected. `/health` is public, but `/temperature` requires the `X-API-Key` header.
+- A plain browser request to `http://AGENT-IP:8090/temperature` has no key and should return Unauthorized.
+- Test with the saved agent key instead:
+
+```bash
+KEY="$(sudo sed -n 's/^THERMO_AGENT_API_KEY=//p' /etc/thermo-agent.env | head -n1 | sed "s/^['\"]//;s/['\"]$//")"
+curl -i http://127.0.0.1:8090/health
+curl -i -H "X-API-Key: $KEY" http://127.0.0.1:8090/temperature
+```
+
 Central URL not reachable:
 
 - Set `THERMO_PUBLIC_URL` to the URL target servers can reach, for example `http://YOUR-THERMO-IP:8088`.

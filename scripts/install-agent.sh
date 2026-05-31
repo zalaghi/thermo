@@ -58,6 +58,8 @@ TEST_TEMPERATURE=""
 DETECTED_IP=""
 DETECTED_HOSTNAME=""
 DETECTED_PLATFORM=""
+HTTP_STATUS=""
+HTTP_BODY=""
 
 PYTHONPATH_DIR=""
 
@@ -172,6 +174,21 @@ redacted_token() {
   printf '%s' "$PAIRING_TOKEN" | awk '{ if (length($0) > 8) print "********" substr($0, length($0)-7); else print "********" }'
 }
 
+redacted_secret() {
+  value="$1"
+  if [ -z "$value" ]; then
+    printf '%s' "<missing>"
+    return
+  fi
+  printf '%s' "$value" | awk '{
+    if (length($0) > 8) {
+      print substr($0, 1, 4) "..." substr($0, length($0)-3)
+    } else {
+      print "********"
+    }
+  }'
+}
+
 require_root() {
   if [ "$DRY_RUN" -eq 1 ]; then
     return
@@ -202,6 +219,10 @@ validate_bind_host() {
 
 shell_quote() {
   printf "%s" "$1" | sed "s/'/'\\\\''/g; 1s/^/'/; \$s/\$/'/"
+}
+
+strip_wrapping_quotes() {
+  sed "s/^['\"]//;s/['\"]$//"
 }
 
 owner_group() {
@@ -504,8 +525,38 @@ fetch_bootstrap() {
   BOOTSTRAP_JSON="$(http_get "$THERMO_URL/api/setup/bootstrap?token=$PAIRING_TOKEN")" || fail "Bootstrap request failed. Check the Thermo URL and pairing token."
 }
 
+print_redacted_bootstrap_json() {
+  if [ -z "$BOOTSTRAP_JSON" ]; then
+    log "<empty bootstrap response>"
+    return
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    BOOTSTRAP_JSON="$BOOTSTRAP_JSON" python3 - <<'PY' || printf '%s\n' "$BOOTSTRAP_JSON"
+import json
+import os
+
+body = os.environ.get("BOOTSTRAP_JSON", "")
+try:
+    payload = json.loads(body)
+except Exception:
+    print(body)
+    raise SystemExit(0)
+
+for key in ("agent_api_key", "token", "pairing_token"):
+    if key in payload and payload[key]:
+        value = str(payload[key])
+        payload[key] = value[:4] + "..." + value[-4:] if len(value) > 8 else "********"
+print(json.dumps(payload, sort_keys=True))
+PY
+    return
+  fi
+
+  printf '%s\n' "$BOOTSTRAP_JSON" | sed -E 's/("agent_api_key"[[:space:]]*:[[:space:]]*")[^"]+/\1<redacted>/g'
+}
+
 parse_bootstrap() {
-  parsed="$(
+  if ! parsed="$(
     BOOTSTRAP_JSON="$BOOTSTRAP_JSON" python3 - <<'PY'
 import json
 import os
@@ -523,18 +574,28 @@ def emit(name, value):
 
 emit("SERVER_NAME", payload.get("server_name", ""))
 emit("BOOTSTRAP_PLATFORM", payload.get("platform", ""))
-emit("BOOTSTRAP_BIND_HOST", payload.get("bind_host", "0.0.0.0"))
-emit("BOOTSTRAP_AGENT_PORT", payload.get("agent_port", "8090"))
+emit("BOOTSTRAP_BIND_HOST", payload.get("bind_host", ""))
+emit("BOOTSTRAP_AGENT_PORT", payload.get("agent_port", ""))
 emit("CENTRAL_URL", payload.get("central_url", ""))
 emit("AGENT_API_KEY", payload.get("agent_api_key", ""))
-emit("SOURCE_TARBALL_URL", payload.get("source_tarbball_url") or payload.get("source_tarball_url") or "")
+emit("SOURCE_TARBALL_URL", payload.get("source_tarball_url") or payload.get("source_tarbball_url") or "")
 emit("TEMPERATURE_COMMAND_HINT", payload.get("temperature_command_hint", ""))
 PY
-  )" || fail "Could not parse bootstrap configuration."
+  )"; then
+    log "Bootstrap response body with secrets redacted:"
+    print_redacted_bootstrap_json
+    fail "Could not parse bootstrap configuration."
+  fi
 
   eval "$parsed"
 
-  [ -n "$AGENT_API_KEY" ] || fail "Bootstrap response did not include an agent API key."
+  if [ -z "$AGENT_API_KEY" ]; then
+    log "Bootstrap response body with secrets redacted:"
+    print_redacted_bootstrap_json
+    fail "Installer bug: missing generated agent API key from bootstrap response."
+  fi
+  [ -n "$BOOTSTRAP_AGENT_PORT" ] || fail "Bootstrap response did not include an agent port."
+  [ -n "$BOOTSTRAP_BIND_HOST" ] || fail "Bootstrap response did not include a bind host."
   [ -n "$SOURCE_TARBALL_URL" ] || SOURCE_TARBALL_URL="$DEFAULT_SOURCE_TARBALL_URL"
 
   if [ -n "$OVERRIDE_BIND_HOST" ]; then
@@ -551,6 +612,7 @@ PY
 
   validate_port "$AGENT_PORT" || fail "--port must be a number between 1 and 65535."
   validate_bind_host "$BIND_HOST" || fail "--bind-host must be a host or IP without spaces, slashes, or URL scheme."
+  debug_log "Bootstrap agent key: $(redacted_secret "$AGENT_API_KEY")"
 }
 
 temperature_extract() {
@@ -698,20 +760,50 @@ create_python_env() {
   chown -R "$(owner_group)" "$PYTHONPATH_DIR"
 }
 
+validate_agent_api_key() {
+  if [ -z "$AGENT_API_KEY" ]; then
+    fail "Installer bug: missing generated agent API key from bootstrap response."
+  fi
+  case "$AGENT_API_KEY" in
+    *[!A-Za-z0-9_-]*)
+      fail "Installer bug: generated agent API key contains unsupported characters."
+      ;;
+  esac
+}
+
+read_agent_api_key_from_env() {
+  [ -f "$ENV_FILE" ] || return 1
+  sed -n 's/^THERMO_AGENT_API_KEY=//p' "$ENV_FILE" | head -n 1 | strip_wrapping_quotes
+}
+
+verify_agent_api_key_env_consistency() {
+  env_api_key="$(read_agent_api_key_from_env || true)"
+  if [ -z "$env_api_key" ]; then
+    fail "Installer bug: THERMO_AGENT_API_KEY was not written to $ENV_FILE."
+  fi
+  if [ "$env_api_key" != "$AGENT_API_KEY" ]; then
+    log "In-memory API key: $(redacted_secret "$AGENT_API_KEY")"
+    log "Env-file API key: $(redacted_secret "$env_api_key")"
+    fail "Installer bug: generated agent API key does not match $ENV_FILE."
+  fi
+  debug_log "Verified agent API key in $ENV_FILE: $(redacted_secret "$env_api_key")"
+}
+
 write_env_file() {
   log "Writing $ENV_FILE..."
+  validate_agent_api_key
   mkdir -p "$(dirname "$ENV_FILE")"
-  api_key_quoted="$(shell_quote "$AGENT_API_KEY")"
   temp_command_quoted="$(shell_quote "$TEMP_COMMAND")"
 
   umask 077
   cat >"$ENV_FILE" <<EOF
-THERMO_AGENT_API_KEY=$api_key_quoted
+THERMO_AGENT_API_KEY=$AGENT_API_KEY
 THERMO_TEMP_COMMAND=$temp_command_quoted
-THERMO_TEMP_TIMEOUT_SECONDS='3'
+THERMO_TEMP_TIMEOUT_SECONDS=3
 EOF
   chown "$(owner_group)" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
+  verify_agent_api_key_env_consistency
 }
 
 write_registration_retry_files() {
@@ -1016,22 +1108,43 @@ test_url() {
 test_url_body() {
   url="$1"
   header="$2"
+  response_file="$(mktemp "${TMPDIR:-/tmp}/thermo-agent-response.XXXXXX")"
+  status_code=""
+  body=""
+
   if command -v curl >/dev/null 2>&1; then
     if [ -n "$header" ]; then
-      curl -sS -H "$header" "$url"
+      status_code="$(curl -sS -o "$response_file" -w "%{http_code}" -H "$header" "$url" || printf '%s' "000")"
     else
-      curl -sS "$url"
+      status_code="$(curl -sS -o "$response_file" -w "%{http_code}" "$url" || printf '%s' "000")"
     fi
+    body="$(cat "$response_file" 2>/dev/null || true)"
+    rm -f "$response_file"
+    HTTP_STATUS="$status_code"
+    HTTP_BODY="$body"
     return
   fi
   if command -v fetch >/dev/null 2>&1; then
     if [ -n "$header" ]; then
-      fetch -q -o - --header "$header" "$url"
+      if fetch -q -o "$response_file" --header "$header" "$url"; then
+        status_code="200"
+      else
+        status_code="000"
+      fi
     else
-      fetch -q -o - "$url"
+      if fetch -q -o "$response_file" "$url"; then
+        status_code="200"
+      else
+        status_code="000"
+      fi
     fi
+    body="$(cat "$response_file" 2>/dev/null || true)"
+    rm -f "$response_file"
+    HTTP_STATUS="$status_code"
+    HTTP_BODY="$body"
     return
   fi
+  rm -f "$response_file"
   fail "curl or fetch is required."
 }
 
@@ -1042,7 +1155,38 @@ print_redacted_env_summary() {
   log "  Bind host: $BIND_HOST"
   log "  Port: $AGENT_PORT"
   log "  Temperature command: ${TEMP_COMMAND_LABEL:-custom/unknown}"
-  log "  API key: stored in $ENV_FILE (redacted)"
+  env_api_key="$(read_agent_api_key_from_env 2>/dev/null || true)"
+  if [ -n "$env_api_key" ]; then
+    log "  API key: $(redacted_secret "$env_api_key")"
+  else
+    log "  API key: <missing from $ENV_FILE>"
+  fi
+}
+
+print_redacted_runtime_config() {
+  if [ "$OS_KIND" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+    log "systemd service environment with secrets redacted:"
+    systemctl show "$SERVICE_NAME" -p Environment 2>/dev/null | \
+      sed -E 's/(THERMO_AGENT_API_KEY=)[^[:space:]]+/\1<redacted>/g' || true
+  fi
+
+  if [ -f "$ENV_FILE" ]; then
+    log "$ENV_FILE with secrets redacted:"
+    sed -E 's/^THERMO_AGENT_API_KEY=.*/THERMO_AGENT_API_KEY=<redacted>/' "$ENV_FILE" || true
+  fi
+}
+
+print_manual_debug_commands() {
+  log "Manual debug commands:"
+  log "  KEY=\"\$(sudo sed -n 's/^THERMO_AGENT_API_KEY=//p' $ENV_FILE | head -n1 | sed \"s/^['\\\"']//;s/['\\\"']$//\")\""
+  log "  curl -i http://127.0.0.1:$AGENT_PORT/health"
+  log "  curl -i -H \"X-API-Key: \$KEY\" http://127.0.0.1:$AGENT_PORT/temperature"
+  if [ "$OS_KIND" = "linux" ]; then
+    log "  sudo systemctl status $SERVICE_NAME --no-pager"
+    log "  sudo journalctl -u $SERVICE_NAME -n 100 --no-pager"
+  else
+    log "  service $SERVICE_NAME status"
+  fi
 }
 
 print_service_logs() {
@@ -1068,11 +1212,22 @@ print_service_logs() {
 
 print_agent_diagnostics() {
   print_redacted_env_summary
+  print_redacted_runtime_config
+  print_manual_debug_commands
   print_service_logs
 }
 
 test_agent() {
   log "Testing local agent endpoints..."
+  if [ -z "$AGENT_API_KEY" ]; then
+    fail "Installer bug: missing generated agent API key from bootstrap response."
+  fi
+  if [ -z "$AGENT_PORT" ]; then
+    fail "Installer bug: missing agent port before local test."
+  fi
+  verify_agent_api_key_env_consistency
+  debug_log "Testing /temperature with API key $(redacted_secret "$AGENT_API_KEY")"
+
   health_url="http://127.0.0.1:$AGENT_PORT/health"
   temp_url="http://127.0.0.1:$AGENT_PORT/temperature"
 
@@ -1090,12 +1245,27 @@ test_agent() {
     fi
   fi
 
-  if ! temp_json="$(test_url_body "$temp_url" "X-API-Key: $AGENT_API_KEY" 2>&1)"; then
+  test_url_body "$temp_url" "X-API-Key: $AGENT_API_KEY"
+  temp_json="$HTTP_BODY"
+  if [ "$HTTP_STATUS" = "401" ]; then
+    log "Agent rejected the API key during local test."
+    log "This means the service did not receive the same THERMO_AGENT_API_KEY that the installer used."
     log "Agent /temperature response body:"
     log "$temp_json"
     print_agent_diagnostics
     fail "Agent /temperature check failed."
   fi
+  case "$HTTP_STATUS" in
+    2??)
+      ;;
+    *)
+      log "Agent /temperature returned HTTP $HTTP_STATUS."
+      log "Agent /temperature response body:"
+      log "$temp_json"
+      print_agent_diagnostics
+      fail "Agent /temperature check failed."
+      ;;
+  esac
 
   if ! TEST_TEMPERATURE="$(
     TEMP_JSON="$temp_json" python3 - <<'PY'

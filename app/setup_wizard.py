@@ -263,7 +263,6 @@ def bootstrap_pairing(session: Session, raw_token: str, central_url: str) -> dic
         "central_url": settings.public_url or central_url.rstrip("/"),
         "agent_api_key": pairing.generated_agent_api_key_encrypted_or_temporary,
         "temperature_command_hint": temperature_command_hint(pairing.platform),
-        "source_tarbball_url": source_tarball_url,
         "source_tarball_url": source_tarball_url,
     }
 
