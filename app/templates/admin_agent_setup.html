@@ -16,11 +16,16 @@
       </div>
     {% endif %}
 
-    {% if public_url_missing %}
+    {% if public_url_is_fallback %}
       <div class="form-warning" role="alert">
-        <p>THERMO_PUBLIC_URL is not configured. Set it to the Thermo URL reachable from target servers, for example http://192.168.1.50:8088.</p>
+        <p>THERMO_PUBLIC_URL is not configured. Thermo is using the current browser URL as a fallback: {{ effective_public_url }}. For reliable installer commands, set THERMO_PUBLIC_URL to the LAN URL target servers can reach.</p>
       </div>
     {% endif %}
+
+    <div class="setup-summary">
+      <span>Central Thermo URL</span>
+      <strong>{{ effective_public_url }}</strong>
+    </div>
 
     <form class="form-stack" method="post" action="/admin/setup-agent">
       <input name="csrf_token" type="hidden" value="{{ csrf_token }}">

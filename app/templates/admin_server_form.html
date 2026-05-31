@@ -4,7 +4,13 @@
   <section class="auth-panel server-form-panel" aria-labelledby="server-form-title">
     <div class="section-heading">
       <p class="eyebrow">Admin</p>
-      <h2 id="server-form-title">{{ "Add server" if mode == "new" else "Edit server" }}</h2>
+      <h2 id="server-form-title">{{ "Advanced manual server" if mode == "new" else "Edit server" }}</h2>
+      <p>Use this for unusual systems or existing agents. The Agent Setup Wizard is recommended for new servers.</p>
+    </div>
+
+    <div class="form-warning">
+      <p>New server? Use the wizard when possible so Thermo can generate the agent key, install command, and registration automatically.</p>
+      <a class="button-link" href="/admin/setup-agent">Open Agent Setup Wizard</a>
     </div>
 
     {% if errors %}
@@ -15,7 +21,13 @@
       </div>
     {% endif %}
 
-    <form class="form-stack" method="post" action="{{ '/admin/servers/new' if mode == 'new' else '/admin/servers/' ~ server_id ~ '/edit' }}">
+    <form
+      class="form-stack"
+      method="post"
+      action="{{ '/admin/servers/new' if mode == 'new' else '/admin/servers/' ~ server_id ~ '/edit' }}"
+      data-server-form
+      data-server-id="{{ server_id or '' }}"
+    >
       <input name="csrf_token" type="hidden" value="{{ csrf_token }}">
 
       <label>
@@ -25,17 +37,30 @@
 
       <label>
         <span>URL</span>
-        <input name="url" type="url" inputmode="url" value="{{ form_data.url }}" placeholder="http://192.168.1.10:8090/temperature" required>
+        <input id="server-url" name="url" type="url" inputmode="url" value="{{ form_data.url }}" placeholder="http://192.168.4.10:8090/temperature" required>
+        <span class="field-note">Agent URL must point to the `/temperature` endpoint, usually `http://AGENT-IP:8090/temperature`.</span>
+      </label>
+
+      <label class="checkbox-row">
+        <input name="allow_missing_port" type="checkbox" {% if form_data.allow_missing_port %}checked{% endif %}>
+        <span>Advanced: allow a URL without an explicit port</span>
       </label>
 
       <label>
         <span>API key</span>
-        <input name="api_key" type="password" autocomplete="off" {% if mode == "new" %}required{% endif %}>
+        <input id="server-api-key" name="api_key" type="password" autocomplete="off" {% if mode == "new" %}required{% endif %}>
+        <span class="field-note">{{ "Required for manual setup." if mode == "new" else "Leave blank to keep the saved key." }}</span>
       </label>
 
       {% if mode == "edit" %}
         <p class="field-note">Current key: {{ masked_api_key }}. Leave blank to keep it.</p>
       {% endif %}
+
+      <div class="action-row">
+        <button type="button" data-generate-api-key>Generate API key</button>
+        <button type="button" data-test-agent>Test connection</button>
+      </div>
+      <p class="field-note test-result" data-test-result hidden></p>
 
       <div class="form-grid">
         <label>
@@ -60,4 +85,8 @@
       </div>
     </form>
   </section>
+{% endblock %}
+
+{% block scripts %}
+  <script src="{{ url_for('static', path='/js/admin_server_form.js') }}" defer></script>
 {% endblock %}

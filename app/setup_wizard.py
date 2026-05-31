@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import math
 import secrets
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -18,6 +20,7 @@ from .settings import get_settings
 DEFAULT_WARNING_THRESHOLD = 65.0
 DEFAULT_CRITICAL_THRESHOLD = 80.0
 TOKEN_SUFFIX_LENGTH = 8
+SETUP_AGENT_REQUEST_TIMEOUT_SECONDS = 3.0
 
 LINUX_TEMPERATURE_COMMAND_HINT = (
     "sensors | awk '/Package id 0|Tctl|CPU/ {print $0; exit}' | "
@@ -217,10 +220,14 @@ def pairing_status_payload(pairing: PairingToken) -> dict[str, object]:
         "waiting": status.key == "waiting",
         "token_suffix": pairing.display_token_suffix,
         "expires_at": format_datetime(pairing.expires_at),
+        "expires_label": format_human_datetime(pairing.expires_at),
         "completed_at": format_datetime(pairing.completed_at),
+        "completed_label": format_human_datetime(pairing.completed_at),
         "server_id": pairing.created_server_id,
         "created_server_id": pairing.created_server_id,
         "server_edit_url": f"/admin/servers/{pairing.created_server_id}/edit" if pairing.created_server_id else None,
+        "created_server_name": None,
+        "created_server_url": None,
         "dashboard_url": "/",
         "last_error": pairing.last_error,
         "detected_hostname": pairing.detected_hostname,
@@ -228,6 +235,14 @@ def pairing_status_payload(pairing: PairingToken) -> dict[str, object]:
         "detected_ip": pairing.detected_ip,
         "can_revoke": pairing.used_at is None and pairing.revoked_at is None and not is_expired(pairing.expires_at),
     }
+
+
+def pairing_status_payload_with_server(pairing: PairingToken, server: Optional[Server]) -> dict[str, object]:
+    payload = pairing_status_payload(pairing)
+    if server:
+        payload["created_server_name"] = server.name
+        payload["created_server_url"] = server.url
+    return payload
 
 
 def bootstrap_pairing(session: Session, raw_token: str, central_url: str) -> dict[str, object]:
@@ -265,14 +280,26 @@ def complete_pairing_setup(
         raise PairingError("Pairing token has not been bootstrapped.")
 
     agent_url = str(payload.get("agent_url", "")).strip()
-    if not is_valid_http_url(agent_url):
-        record_pairing_error(pairing, "Installer submitted an invalid agent URL.")
-        raise PairingError("Installer submitted an invalid agent URL.")
+    agent_url_error = validate_agent_temperature_url(agent_url, require_port=True)
+    if agent_url_error:
+        record_pairing_error(pairing, agent_url_error)
+        raise PairingError(agent_url_error)
 
     temperature = payload.get("temperature")
     if temperature is None or not is_numeric(temperature):
         record_pairing_error(pairing, "Installer did not submit a successful local temperature test.")
         raise PairingError("Installer did not submit a successful local temperature test.")
+
+    settings = get_settings()
+    if settings.verify_agent_on_complete:
+        verification_error = verify_agent_from_central(agent_url=agent_url, api_key=agent_api_key)
+        if verification_error:
+            message = (
+                "Agent installed locally, but Thermo could not reach it from the central app. "
+                f"{verification_error} Check firewall and agent URL."
+            )
+            record_pairing_error(pairing, message)
+            raise PairingError(message)
 
     detected_hostname = clean_optional_string(payload.get("detected_hostname"))
     server_name = clean_optional_string(pairing.server_name) or detected_hostname or "Thermo Agent"
@@ -360,6 +387,63 @@ def is_valid_http_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
+def validate_agent_temperature_url(value: str, require_port: bool) -> Optional[str]:
+    if not value:
+        return "Agent URL is required."
+    if any(character.isspace() for character in value):
+        return "Agent URL must not contain spaces."
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return "Agent URL must start with http:// or https:// and include a host."
+    if parsed.path == "/temp" + "rature":
+        return "Agent URL path is misspelled. Use /temperature."
+    if parsed.path != "/temperature":
+        return "Agent URL path must be exactly /temperature."
+    try:
+        parsed_port = parsed.port
+    except ValueError:
+        return "Agent URL port is invalid."
+    if require_port and parsed_port is None:
+        return "Agent URL must include the agent port, for example http://192.168.4.2:8090/temperature."
+    return None
+
+
+def host_is_ip_address(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def verify_agent_from_central(agent_url: str, api_key: str) -> Optional[str]:
+    try:
+        response = httpx.get(
+            agent_url,
+            headers={"X-API-Key": api_key},
+            timeout=SETUP_AGENT_REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except httpx.TimeoutException:
+        return "Request timed out."
+    except httpx.ConnectError:
+        return "Connection refused or unreachable."
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 401:
+            return "Agent rejected the generated API key."
+        return f"Agent returned HTTP {exc.response.status_code}."
+    except httpx.RequestError:
+        return "Request failed."
+    except ValueError:
+        return "Agent returned invalid JSON."
+
+    temperature = payload.get("temperature") if isinstance(payload, dict) else None
+    if temperature is None or not is_numeric(temperature):
+        return "Agent response did not include a numeric temperature."
+    return None
+
+
 def is_valid_bind_host(value: str) -> bool:
     if not value:
         return False
@@ -432,6 +516,14 @@ def format_datetime(value: Optional[datetime]) -> Optional[str]:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.isoformat()
+
+
+def format_human_datetime(value: Optional[datetime]) -> Optional[str]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.strftime("%Y-%m-%d %H:%M UTC")
 
 
 def utc_now() -> datetime:

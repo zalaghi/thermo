@@ -436,6 +436,10 @@ p {
   color: inherit;
 }
 
+.form-warning .button-link {
+  margin-top: 0.8rem;
+}
+
 .form-error p {
   margin-bottom: 0.35rem;
   color: inherit;
@@ -553,6 +557,25 @@ p {
   font-size: 0.9rem;
 }
 
+.setup-command-more {
+  margin-bottom: 1.25rem;
+}
+
+.setup-command-more summary {
+  min-height: 2.75rem;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.75rem 0.9rem;
+  background: var(--surface-strong);
+  color: var(--text);
+  font-weight: 800;
+}
+
+.setup-command-more .setup-command-panel {
+  margin-top: 0.75rem;
+}
+
 .setup-detail {
   display: grid;
   gap: 1rem;
@@ -595,6 +618,56 @@ p {
   padding-left: 0.25rem;
 }
 
+.setup-summary-grid {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.setup-summary {
+  display: grid;
+  gap: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.85rem 0.95rem;
+  background: var(--surface-soft);
+  overflow-wrap: anywhere;
+}
+
+.setup-summary span {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.setup-summary strong {
+  color: var(--text);
+}
+
+.test-result {
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.75rem 0.85rem;
+  background: var(--surface-soft);
+}
+
+.test-result[data-state="ok"] {
+  border-color: rgba(114, 214, 163, 0.36);
+  background: rgba(114, 214, 163, 0.08);
+  color: #b8f2d4;
+}
+
+.test-result[data-state="error"] {
+  border-color: rgba(255, 117, 111, 0.36);
+  background: rgba(255, 117, 111, 0.08);
+  color: #ffc0bd;
+}
+
+.test-result[data-state="pending"] {
+  border-color: rgba(245, 189, 91, 0.34);
+  background: rgba(245, 189, 91, 0.08);
+  color: #ffd998;
+}
+
 @media (min-width: 42rem) {
   .app-shell {
     padding: 2rem;
@@ -630,6 +703,10 @@ p {
   .server-meta dd {
     margin-top: 0.25rem;
     text-align: left;
+  }
+
+  .setup-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

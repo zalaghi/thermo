@@ -26,6 +26,7 @@ OVERRIDE_PORT=""
 DRY_RUN=0
 UNINSTALL=0
 DEPS_INSTALLED=0
+DEBUG=0
 
 TMP_DIR=""
 OS_KIND=""
@@ -52,6 +53,7 @@ AGENT_API_KEY=""
 SOURCE_TARBALL_URL="$DEFAULT_SOURCE_TARBALL_URL"
 TEMPERATURE_COMMAND_HINT=""
 TEMP_COMMAND=""
+TEMP_COMMAND_LABEL=""
 TEST_TEMPERATURE=""
 DETECTED_IP=""
 DETECTED_HOSTNAME=""
@@ -63,6 +65,12 @@ log() {
   printf '%s\n' "$*"
 }
 
+debug_log() {
+  if [ "$DEBUG" -eq 1 ]; then
+    printf 'DEBUG: %s\n' "$*"
+  fi
+}
+
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
   exit 1
@@ -71,16 +79,16 @@ fail() {
 usage() {
   cat <<'EOF'
 Usage:
-  install-agent.sh --thermo-url URL --token TOKEN [--bind-host HOST] [--port PORT] [--dry-run]
+  install-agent.sh --thermo-url URL --token TOKEN [--bind-host HOST] [--port PORT] [--debug] [--dry-run]
   install-agent.sh --uninstall
 
 Examples:
   curl -fsSL "https://raw.githubusercontent.com/zalaghi/thermo/main/scripts/install-agent.sh" | sudo sh -s -- \
-    --thermo-url "http://192.168.1.50:8088" \
+    --thermo-url "http://THERMO-IP:8088" \
     --token "PAIRING_TOKEN"
 
   fetch -o - "https://raw.githubusercontent.com/zalaghi/thermo/main/scripts/install-agent.sh" | sh -s -- \
-    --thermo-url "http://192.168.1.50:8088" \
+    --thermo-url "http://THERMO-IP:8088" \
     --token "PAIRING_TOKEN"
 EOF
 }
@@ -117,6 +125,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --debug)
+      DEBUG=1
       shift
       ;;
     --uninstall)
@@ -396,22 +408,25 @@ install_dependencies() {
     rhel)
       log "Installing dependencies with dnf/yum..."
       if command -v dnf >/dev/null 2>&1; then
-        dnf install -y python3 python3-pip curl ca-certificates tar lm_sensors
+        dnf install -y python3 python3-pip python3-virtualenv curl ca-certificates tar lm_sensors
       elif command -v yum >/dev/null 2>&1; then
-        yum install -y python3 python3-pip curl ca-certificates tar lm_sensors
+        yum install -y python3 python3-pip python3-virtualenv curl ca-certificates tar lm_sensors
       else
         fail "dnf or yum is required on RHEL/Fedora-family systems."
       fi
+      run_sensors_detect
       ;;
     arch)
       command -v pacman >/dev/null 2>&1 || fail "pacman is required on Arch-family systems."
       log "Installing dependencies with pacman..."
       pacman -Sy --noconfirm python curl ca-certificates tar lm_sensors
+      run_sensors_detect
       ;;
     alpine)
       command -v apk >/dev/null 2>&1 || fail "apk is required on Alpine."
       log "Installing dependencies with apk..."
       apk add --no-cache python3 py3-pip py3-virtualenv curl ca-certificates tar lm-sensors
+      run_sensors_detect
       ;;
     freebsd)
       install_freebsd_dependencies
@@ -454,12 +469,7 @@ run_sensors_detect() {
     return
   fi
 
-  if command -v timeout >/dev/null 2>&1 && command -v yes >/dev/null 2>&1; then
-    yes "" | timeout 60 sensors-detect >/dev/null 2>&1 || log "sensors-detect did not complete; continuing."
-    return
-  fi
-
-  log "Skipping sensors-detect to avoid hanging in an interactive prompt."
+  log "Skipping sensors-detect because this version has no --auto option and may prompt interactively."
 }
 
 http_get() {
@@ -552,7 +562,7 @@ command_temperature_value() {
   sh -c "$candidate" 2>/dev/null | awk '/^-?[0-9]+([.][0-9]+)?$/ {print; exit}'
 }
 
-choose_temperature_command() {
+detect_temperature_command() {
   if [ "$OS_KIND" = "freebsd" ]; then
     choose_freebsd_temperature_command
   else
@@ -560,33 +570,76 @@ choose_temperature_command() {
   fi
 }
 
+choose_temperature_command() {
+  detect_temperature_command
+}
+
+try_temperature_candidate() {
+  label="$1"
+  candidate="$2"
+  [ -n "$candidate" ] || return 1
+
+  value="$(command_temperature_value "$candidate" || true)"
+  if [ -n "$value" ]; then
+    TEMP_COMMAND="$candidate"
+    TEMP_COMMAND_LABEL="$label"
+    log "Selected temperature command: $TEMP_COMMAND_LABEL"
+    debug_log "Temperature test value: $value"
+    return 0
+  fi
+  debug_log "Temperature command candidate did not return a number: $label"
+  return 1
+}
+
 choose_linux_temperature_command() {
   extractor="$(temperature_extract)"
   primary="sensors | awk '/Package id 0|Tctl|CPU/ {print \$0; exit}' | $extractor"
+  generic="sensors | grep -oE '[+-]?[0-9]+(\\.[0-9]+)?°C' | head -n1 | tr -d '+°C'"
   alt_k10temp="sensors | awk '/Tctl/ {print \$0; exit}' | $extractor"
   alt_coretemp="sensors | awk '/Package id/ {print \$0; exit}' | $extractor"
   alt_acpitz="sensors | awk '/acpitz|temp1/ {print \$0; exit}' | $extractor"
 
-  for candidate in "$primary" "$alt_k10temp" "$alt_coretemp" "$alt_acpitz" "$TEMPERATURE_COMMAND_HINT"; do
-    [ -n "$candidate" ] || continue
-    if [ -n "$(command_temperature_value "$candidate")" ]; then
-      TEMP_COMMAND="$candidate"
-      return
-    fi
-  done
+  command -v sensors >/dev/null 2>&1 || fail "lm-sensors is installed, but the sensors command was not found."
 
-  TEMP_COMMAND="$primary"
-  log "No current sensor reading matched the known Linux patterns; using the default Linux temperature command."
+  try_temperature_candidate "CPU package / Tctl / CPU" "$primary" && return
+  try_temperature_candidate "Generic first Celsius reading" "$generic" && return
+  try_temperature_candidate "k10temp Tctl" "$alt_k10temp" && return
+  try_temperature_candidate "coretemp Package id" "$alt_coretemp" && return
+  try_temperature_candidate "acpitz temp1" "$alt_acpitz" && return
+  try_temperature_candidate "Bootstrap temperature hint" "$TEMPERATURE_COMMAND_HINT" && return
+
+  print_sensors_output
+  fail "Could not detect a working temperature command. Run 'sensors' and set THERMO_TEMP_COMMAND manually if your hardware uses a different sensor label."
 }
 
 choose_freebsd_temperature_command() {
   command="sysctl -n dev.cpu.0.temperature | sed 's/C//'"
   if command_temperature_value "$command" >/dev/null 2>&1 && [ -n "$(command_temperature_value "$command")" ]; then
     TEMP_COMMAND="$command"
+    TEMP_COMMAND_LABEL="FreeBSD dev.cpu.0.temperature"
+    log "Selected temperature command: $TEMP_COMMAND_LABEL"
     return
   fi
 
   fail "FreeBSD CPU temperature sysctl dev.cpu.0.temperature is unavailable. Run: sysctl -a | grep -i temperature. If this is a jail, it may not be able to read host CPU temperature; use a host-level service carefully or set a different sensor command."
+}
+
+print_sensors_output() {
+  if ! command -v sensors >/dev/null 2>&1; then
+    return
+  fi
+  log "Current sensors output:"
+  sensors 2>&1 || true
+}
+
+verify_env_temperature_command() {
+  log "Verifying selected temperature command before starting the service..."
+  value="$(command_temperature_value "$TEMP_COMMAND" || true)"
+  if [ -z "$value" ]; then
+    print_sensors_output
+    fail "Selected temperature command did not return a numeric value. Service was not started."
+  fi
+  debug_log "Selected command returned $value"
 }
 
 tar_command() {
@@ -817,11 +870,14 @@ remove_registration_retry_files() {
 print_registration_failure_help() {
   log "Thermo setup registration failed after the agent service was installed."
   log "The agent was left installed so you can inspect and retry before the pairing token expires."
+  print_redacted_env_summary
+  print_service_logs
   if [ "$OS_KIND" = "freebsd" ]; then
     log "Service status: service $SERVICE_NAME status"
     log "Retry registration: $INSTALL_DIR/retry-registration.sh"
   else
     log "Service status: systemctl status $SERVICE_NAME"
+    log "Logs: journalctl -u $SERVICE_NAME -n 80 --no-pager"
     log "Retry registration: sudo $INSTALL_DIR/retry-registration.sh"
   fi
 }
@@ -957,6 +1013,64 @@ test_url() {
   fail "curl or fetch is required."
 }
 
+test_url_body() {
+  url="$1"
+  header="$2"
+  if command -v curl >/dev/null 2>&1; then
+    if [ -n "$header" ]; then
+      curl -sS -H "$header" "$url"
+    else
+      curl -sS "$url"
+    fi
+    return
+  fi
+  if command -v fetch >/dev/null 2>&1; then
+    if [ -n "$header" ]; then
+      fetch -q -o - --header "$header" "$url"
+    else
+      fetch -q -o - "$url"
+    fi
+    return
+  fi
+  fail "curl or fetch is required."
+}
+
+print_redacted_env_summary() {
+  log "Thermo agent config summary:"
+  log "  Env file: $ENV_FILE"
+  log "  Install directory: $INSTALL_DIR"
+  log "  Bind host: $BIND_HOST"
+  log "  Port: $AGENT_PORT"
+  log "  Temperature command: ${TEMP_COMMAND_LABEL:-custom/unknown}"
+  log "  API key: stored in $ENV_FILE (redacted)"
+}
+
+print_service_logs() {
+  if [ "$OS_KIND" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+    log "systemctl status $SERVICE_NAME:"
+    systemctl status "$SERVICE_NAME" --no-pager -l || true
+    if command -v journalctl >/dev/null 2>&1; then
+      log "Recent journal logs for $SERVICE_NAME:"
+      journalctl -u "$SERVICE_NAME" -n 80 --no-pager || true
+    fi
+    return
+  fi
+
+  if [ "$OS_KIND" = "freebsd" ] && command -v service >/dev/null 2>&1; then
+    log "service $SERVICE_NAME status:"
+    service "$SERVICE_NAME" status || true
+    if [ "$DEBUG" -eq 1 ] && [ -f /var/log/messages ]; then
+      log "Recent /var/log/messages lines:"
+      tail -n 80 /var/log/messages || true
+    fi
+  fi
+}
+
+print_agent_diagnostics() {
+  print_redacted_env_summary
+  print_service_logs
+}
+
 test_agent() {
   log "Testing local agent endpoints..."
   health_url="http://127.0.0.1:$AGENT_PORT/health"
@@ -966,24 +1080,48 @@ test_agent() {
     if [ "$BIND_HOST" != "0.0.0.0" ] && [ "$BIND_HOST" != "127.0.0.1" ]; then
       health_url="http://$BIND_HOST:$AGENT_PORT/health"
       temp_url="http://$BIND_HOST:$AGENT_PORT/temperature"
-      test_url "$health_url" "" >/dev/null || fail "Agent /health check failed."
+      if ! test_url "$health_url" "" >/dev/null 2>&1; then
+        print_agent_diagnostics
+        fail "Agent /health check failed."
+      fi
     else
+      print_agent_diagnostics
       fail "Agent /health check failed."
     fi
   fi
 
-  temp_json="$(test_url "$temp_url" "X-API-Key: $AGENT_API_KEY")" || fail "Agent /temperature check failed."
-  TEST_TEMPERATURE="$(
+  if ! temp_json="$(test_url_body "$temp_url" "X-API-Key: $AGENT_API_KEY" 2>&1)"; then
+    log "Agent /temperature response body:"
+    log "$temp_json"
+    print_agent_diagnostics
+    fail "Agent /temperature check failed."
+  fi
+
+  if ! TEST_TEMPERATURE="$(
     TEMP_JSON="$temp_json" python3 - <<'PY'
 import json
+import math
 import os
 
 payload = json.loads(os.environ["TEMP_JSON"])
-print(payload.get("temperature", ""))
+temperature = float(payload["temperature"])
+if not math.isfinite(temperature):
+    raise SystemExit("temperature was not finite")
+print(temperature)
 PY
-  )" || fail "Could not parse local agent temperature response."
+  )"; then
+    log "Agent /temperature response body:"
+    log "$temp_json"
+    print_agent_diagnostics
+    fail "Could not parse local agent temperature response."
+  fi
 
-  [ -n "$TEST_TEMPERATURE" ] || fail "Local agent temperature response did not include a temperature."
+  if [ -z "$TEST_TEMPERATURE" ]; then
+    log "Agent /temperature response body:"
+    log "$temp_json"
+    print_agent_diagnostics
+    fail "Local agent temperature response did not include a temperature."
+  fi
 }
 
 detect_primary_ip() {
@@ -1079,6 +1217,7 @@ main_install() {
   install_agent_files
   create_python_env
   write_env_file
+  verify_env_temperature_command
   create_service
   start_service
   sleep 2

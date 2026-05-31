@@ -1,7 +1,11 @@
 {% extends "base.html" %}
 
 {% block content %}
-  <section class="auth-panel server-form-panel setup-detail" aria-labelledby="setup-detail-title" data-pairing-status-url="/api/setup/status/{{ pairing.id }}">
+  <section
+    class="auth-panel server-form-panel setup-detail"
+    aria-labelledby="setup-detail-title"
+    data-pairing-status-url="/api/setup/status/{{ pairing.id }}"
+  >
     <div class="section-heading">
       <p class="eyebrow">Install Agent</p>
       <h2 id="setup-detail-title">{{ pairing.server_name }}</h2>
@@ -11,7 +15,7 @@
     <div class="setup-status-panel status-{{ status.status_key }}">
       <div>
         <span class="status-pill" data-pairing-status>{{ status.status_label }}</span>
-        <p>Token ends {{ pairing.display_token_suffix }} · expires {{ pairing.expires_at }}</p>
+        <p>Token ends {{ pairing.display_token_suffix }} · expires <time datetime="{{ status.expires_at }}">{{ status.expires_label or status.expires_at }}</time></p>
       </div>
       {% if status.last_error %}
         <p class="temperature-error" data-pairing-error>{{ status.last_error }}</p>
@@ -33,24 +37,59 @@
       </p>
     </div>
 
-    {% if install_commands %}
-      <div class="setup-command-panel" aria-live="polite">
-        <h3>Linux / Proxmox / Debian</h3>
-        <pre><code id="linux-install-command">{{ install_commands.linux }}</code></pre>
-        <button type="button" data-copy-target="#linux-install-command">Copy Linux command</button>
-        <p class="field-note" data-copy-feedback hidden></p>
+    <div class="setup-summary-grid">
+      <div class="setup-summary">
+        <span>Central Thermo URL</span>
+        <strong>{{ effective_public_url }}</strong>
       </div>
+      <div class="setup-summary">
+        <span>Target agent URL</span>
+        <strong>{{ target_agent_url_preview }}</strong>
+      </div>
+    </div>
 
-      <div class="setup-command-panel">
-        <h3>FreeBSD / TrueNAS CORE</h3>
-        <p>Use one of these when sudo is unavailable.</p>
-        <p class="field-note">Recommended: run this in a FreeBSD jail only if the jail can access the required temperature sensor. Otherwise run on the TrueNAS host with care.</p>
-        <pre><code id="freebsd-fetch-command">{{ install_commands.freebsd_fetch }}</code></pre>
-        <button type="button" data-copy-target="#freebsd-fetch-command">Copy fetch command</button>
-        <pre><code id="freebsd-curl-command">{{ install_commands.freebsd_curl }}</code></pre>
-        <button type="button" data-copy-target="#freebsd-curl-command">Copy curl command</button>
-        <p class="field-note" data-copy-feedback hidden></p>
-      </div>
+    {% if install_commands %}
+      {% set is_freebsd_platform = pairing.platform in ["freebsd", "truenas_core"] %}
+
+      {% if is_freebsd_platform %}
+        <div class="setup-command-panel" aria-live="polite">
+          <h3>FreeBSD / TrueNAS CORE</h3>
+          <p class="field-note">Recommended: run this in a FreeBSD jail only if the jail can access the required temperature sensor. Otherwise run on the TrueNAS host with care.</p>
+          <pre><code id="freebsd-fetch-command">{{ install_commands.freebsd_fetch }}</code></pre>
+          <button type="button" data-copy-target="#freebsd-fetch-command">Copy fetch command</button>
+          <pre><code id="freebsd-curl-command">{{ install_commands.freebsd_curl }}</code></pre>
+          <button type="button" data-copy-target="#freebsd-curl-command">Copy curl command</button>
+          <p class="field-note" data-copy-feedback hidden></p>
+        </div>
+
+        <details class="setup-command-more">
+          <summary>Linux command</summary>
+          <div class="setup-command-panel">
+            <pre><code id="linux-install-command">{{ install_commands.linux }}</code></pre>
+            <button type="button" data-copy-target="#linux-install-command">Copy Linux command</button>
+            <p class="field-note" data-copy-feedback hidden></p>
+          </div>
+        </details>
+      {% else %}
+        <div class="setup-command-panel" aria-live="polite">
+          <h3>Linux / Proxmox / Debian</h3>
+          <pre><code id="linux-install-command">{{ install_commands.linux }}</code></pre>
+          <button type="button" data-copy-target="#linux-install-command">Copy Linux command</button>
+          <p class="field-note" data-copy-feedback hidden></p>
+        </div>
+
+        <details class="setup-command-more">
+          <summary>FreeBSD / TrueNAS CORE commands</summary>
+          <div class="setup-command-panel">
+            <p class="field-note">Use one of these when sudo is unavailable.</p>
+            <pre><code id="freebsd-fetch-command">{{ install_commands.freebsd_fetch }}</code></pre>
+            <button type="button" data-copy-target="#freebsd-fetch-command">Copy fetch command</button>
+            <pre><code id="freebsd-curl-command">{{ install_commands.freebsd_curl }}</code></pre>
+            <button type="button" data-copy-target="#freebsd-curl-command">Copy curl command</button>
+            <p class="field-note" data-copy-feedback hidden></p>
+          </div>
+        </details>
+      {% endif %}
     {% else %}
       <div class="form-warning">
         <p>The full install command was shown once when this token was created. Generate a new token if you need another copy.</p>
@@ -58,15 +97,21 @@
     {% endif %}
 
     <ol class="setup-steps">
-      <li>Copy this command.</li>
-      <li>Run it on the target server.</li>
-      <li>Wait for registration.</li>
-      <li>Return to the dashboard.</li>
+      <li><strong>Copy</strong> the command for the target platform.</li>
+      <li><strong>Run</strong> it on the target server.</li>
+      <li><strong>Wait</strong> for the agent to install, test itself, and register.</li>
+      <li><strong>Return</strong> to the dashboard after the status changes to completed.</li>
     </ol>
 
     <div class="action-row" data-completed-actions {% if not status.completed %}hidden{% endif %}>
       <a class="button-link" href="/">Open dashboard</a>
       <a class="button-link" data-server-edit-link href="{{ status.server_edit_url or '#' }}">Edit server</a>
+    </div>
+
+    <div class="setup-summary" data-completed-summary {% if not status.completed %}hidden{% endif %}>
+      <span>Registered server</span>
+      <strong data-created-server-name>{{ status.created_server_name or status.server_name }}</strong>
+      <span data-created-server-url>{{ status.created_server_url or "" }}</span>
     </div>
 
     <div class="action-row" data-new-token-actions {% if not status.failed and not status.expired %}hidden{% endif %}>

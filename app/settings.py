@@ -33,6 +33,7 @@ class Settings:
     agent_default_port: int
     agent_install_script_url: str
     agent_source_tarball_url: str
+    verify_agent_on_complete: bool
 
 
 def _path_from_env(name: str, default: Path) -> Path:
@@ -75,6 +76,18 @@ def _str_from_env(name: str, default: str) -> str:
     return value.strip() or default
 
 
+def _bool_from_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 @lru_cache
 def get_settings() -> Settings:
     secret_key = os.getenv("THERMO_SECRET_KEY")
@@ -98,4 +111,5 @@ def get_settings() -> Settings:
         agent_default_port=_int_from_env("THERMO_AGENT_DEFAULT_PORT", 8090),
         agent_install_script_url=_str_from_env("THERMO_AGENT_INSTALL_SCRIPT_URL", DEFAULT_AGENT_INSTALL_SCRIPT_URL),
         agent_source_tarball_url=_str_from_env("THERMO_AGENT_SOURCE_TARBALL_URL", DEFAULT_AGENT_SOURCE_TARBALL_URL),
+        verify_agent_on_complete=_bool_from_env("THERMO_VERIFY_AGENT_ON_COMPLETE", True),
     )
